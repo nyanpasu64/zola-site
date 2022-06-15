@@ -10,6 +10,7 @@ build_search_index = false
 theme = "tale-zola"
 title = "nyanpasu64's blog"
 description = "Adventures in programming, DSP, and chiptune"
+generate_feed = true
 
 [markdown]
 # Whether to do syntax highlighting
