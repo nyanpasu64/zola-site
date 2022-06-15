@@ -20,5 +20,9 @@ highlight_code = true
 # Put all your custom variables here
 author = "nyanpasu64"
 
+[[extra.menu]]
+name = "Posts"
+url = "/"
+
 [extra.footer]
 info = "Adventures in programming, DSP, and chiptune."
