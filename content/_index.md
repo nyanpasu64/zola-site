@@ -1,6 +1,6 @@
 +++
 sort_by = "date"
-paginate_by = 5
+paginate_by = 20
 +++
 
 Hi there! I’m nyanpasu64 and I like headpats.
