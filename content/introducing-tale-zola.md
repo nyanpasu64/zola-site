@@ -10,7 +10,9 @@ tags = ["Tale"]
 author = "Aaran Xu"
 +++
 
-Hopefully this blog engine handles wide text blocks properly, wrapping long words and scrolling long code blocks:
+*Hopefully* this blog engine handles `wide text blocks` properly, wrapping long words and scrolling long code blocks:
+<!-- more -->
+## markdown in preview?
 
 InternalFrameInternalFrameTitlePaneInternalFrameTitlePaneMaximizeButtonWindowNotFocusedState
 
