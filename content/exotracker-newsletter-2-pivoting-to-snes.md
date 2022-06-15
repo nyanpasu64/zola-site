@@ -19,9 +19,9 @@ I'm going to use a SPC700 emulation core (likely Blargg's). I think only the S-S
 
 [^1]: In FamiTracker:
 
-    - Tempo only matches "beats/min" if Speed * "Highlight 1" = 24.
-    - Speed only matches "ticks/row" if Tempo = "ticks/second" * 2.5.
-    - Speed defaults to 6 "ticks/row". Highlight 1 defaults to 4 rows/beat. Tempo defaults to 150 "beats/min". Ticks/second defaults to 60 (or 50 on PAL) because ticks are usually triggered by vblanks/frames.
+- Tempo only matches "beats/min" if Speed * "Highlight 1" = 24.
+- Speed only matches "ticks/row" if Tempo = "ticks/second" * 2.5.
+- Speed defaults to 6 "ticks/row". Highlight 1 defaults to 4 rows/beat. Tempo defaults to 150 "beats/min". Ticks/second defaults to 60 (or 50 on PAL) because ticks are usually triggered by vblanks/frames.
 
 ## Designing an instrument list
 
