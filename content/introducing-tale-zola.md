@@ -10,6 +10,14 @@ tags = ["Tale"]
 author = "Aaran Xu"
 +++
 
+Hopefully this blog engine handles wide text blocks properly, wrapping long words and scrolling long code blocks:
+
+InternalFrameInternalFrameTitlePaneInternalFrameTitlePaneMaximizeButtonWindowNotFocusedState
+
+```
+InternalFrameInternalFrameTitlePaneInternalFrameTitlePaneMaximizeButtonWindowNotFocusedState
+```
+
 Tala-Zola is a minimal [Zola](https://www.getzola.org) theme helping you to
 build a light and seo-ready blog, and you can customise any information of the
 blog without having to modify the codes of the template. Tala-Zola is a port of
