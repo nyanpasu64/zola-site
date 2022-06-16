@@ -4,7 +4,7 @@ title: Implementing low-latency shared/exclusive mode audio output/duplex
 date: 2022-06-14T00:00:00-07:00
 ---
 
-Audio output and duplex is actually quite tricky, and even libraries like RtAudio get it wrong. If you're writing an app that needs low-latency audio without glitches, the proper implementation architecture differs between apps talking to pull-mode (well-designed, low-latency) mixing daemons, and apps talking to hardware. (I hear push-mode mixing daemons are incompatible with low latency; I discuss this at the end.) This is my best understanding of the problem right now.
+Audio output and duplex is actually quite tricky, and even libraries like RtAudio's ALSA backend get it wrong. If you're writing an app that needs low-latency audio without glitches, the proper implementation architecture differs between apps talking to pull-mode (well-designed, low-latency) mixing daemons, and apps talking to hardware. <!-- more --> (I hear push-mode mixing daemons are incompatible with low latency; I discuss this at the end.) This is my best understanding of the problem right now.
 
 ## Prior art
 
@@ -43,7 +43,7 @@ However you can read and write arbitrary chunks of audio anyway, and query the e
 
 ## Minimum achievable input/output/duplex latency
 
-The minimum achievable audio latency at a given period size is achieved by having 2 periods of total capture/playback buffering between hardware and a app (RtApiAlsa, JACK2, or PipeWire).
+The minimum achievable audio latency at a given period size is achieved by having 2 periods of total capture/playback buffering between hardware and a app (like JACK2, PipeWire, and well-designed ALSA apps).
 
 - If an audio daemon mixes audio from multiple apps, it can only avoid adding latency if there is no buffering (but instead synchronous execution) between the daemon and apps. JACK2 in synchronous mode and PipeWire support this, but pipewire-alsa fails this test by default, so ALSA is not a zero-latency way of talking to PipeWire.
 

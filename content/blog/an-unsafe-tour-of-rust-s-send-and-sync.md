@@ -5,7 +5,7 @@ date: 2021-01-01T06:54:00-08:00
 updated: 2021-02-09
 ---
 
-Rust's concurrency safety is based around the `Send` and `Sync` traits. For people writing safe code, you don't really need to understand these traits on a deep level, only enough to satisfy the compiler when it spits errors at you (or switch from `std` threads to Crossbeam scoped threads to make errors go away). However if you're writing unsafe concurrent code, such as having a `&UnsafeCell<T>` hand out `&T` and `&mut T`, you need to understand `Send` and `Sync` at a more fundamental level, to pick the appropriate trait bounds when writing `unsafe impl Send/Sync` statements, or add the appropriate `PhantomData<T>` to your types.
+Rust's concurrency safety is based around the `Send` and `Sync` traits. For people writing safe code, you don't really need to understand these traits on a deep level, only enough to satisfy the compiler when it spits errors at you (or switch from `std` threads to Crossbeam scoped threads to make errors go away).<!-- more --> However if you're writing unsafe concurrent code, such as having a `&UnsafeCell<T>` hand out `&T` and `&mut T`, you need to understand `Send` and `Sync` at a more fundamental level, to pick the appropriate trait bounds when writing `unsafe impl Send/Sync` statements, or add the appropriate `PhantomData<T>` to your types.
 
 In this article, I will explore the precise behavior of `Send` and `Sync`, and explain *why* the standard library's trait bounds are the way they are.
 
