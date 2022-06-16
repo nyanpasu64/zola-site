@@ -27,7 +27,7 @@ I'm going to use a SPC700 emulation core (likely Blargg's). I think only the S-S
 
 There is no instrument editor, and I don't know when there will be one. In the meantime I've been working on adding an instrument list.
 
-{% include img-125.html src="instrument-list.png" alt="I added an instrument list widget. The instruments form columns, just like FamiTracker's instrument list. Unlike FamiTracker, it shows all 128 instrument slots, even though most of them are empty. It's confusing to look at." %}
+{{ img125(src="instrument-list.png", alt="I added an instrument list widget. The instruments form columns, just like FamiTracker's instrument list. Unlike FamiTracker, it shows all 128 instrument slots, even though most of them are empty. It's confusing to look at.") }}
 
 So looking at this picture, obviously it needs improvement. Aside from showing dozens of empty slots, another difference from FamiTracker is that each column has its own width, instead of matching the width of the widest instrument in any column. I'm not sure if that's a good or bad thing, or if the Qt GUI library allows me to change it.
 
@@ -37,7 +37,7 @@ One solution is to copy how FamiTracker only shows occupied instrument slots. Im
 
 Unfortunately FamiTracker's instrument drag-and-drop behavior leaves features to be desired. FamiTracker defines drag-and-drop to swap instruments (and not empty slots). But sometimes I want to move an instrument into an empty slot, which is not possible (unless you fill empty slots with placeholder instruments). And sometimes I want to insert, remove, or move instruments, which shifts all instrument numbers afterwards by 1. (In some cases, this may even include empty slots as well, which may or may not be desirable.) This is not possible in FamiTracker unless you drag each instrument over one by one, which is tedious.
 
-{% include img-100.html src="famitracker-instrument-groups.png" alt="At 96 DPI, FamiTracker's instruments are grouped into 8-instrument columns. Each has the same leading digit, and each leading digit is split into exactly 2 columns." %}
+{{ img100(src="famitracker-instrument-groups.png", alt="At 96 DPI, FamiTracker's instruments are grouped into 8-instrument columns. Each has the same leading digit, and each leading digit is split into exactly 2 columns.") }}
 
 I also like to categorize instruments into percussion, melodic, and expansion chip instruments, then divide them into groups of 8. This is because in FamiTracker, the instrument list is rendered as groups of 8 instruments. However since FamiTracker does not render empty instrument slots, this requires creating empty instruments to fill in any gaps in the numbering scheme.
 <!-- I also use empty instruments in FamiTracker to group instruments. In FamiTracker, there's 8 instruments in each column, so i can organize them in groups of 8. However this requires creating empty instruments in between. -->
@@ -45,7 +45,7 @@ I also like to categorize instruments into percussion, melodic, and expansion ch
 
 (Sidenote: If the list widget isn't exactly 8 instruments tall, this grouping system breaks, and the instruments are no longer arranged in visually neat columns corresponding 0x0 through 0x7 and 0x8 through 0xf.)
 
-{% include img-125.html src="famitracker-instrument-groups-125.png" alt="Unfortunately at 120 DPI, FamiTracker's instrument list is 9 instruments tall rather than 8 (due to rounding differences), breaking the groups. At 192 DPI, the list is 10 instruments tall!" %}
+{{ img125(src="famitracker-instrument-groups-125.png", alt="Unfortunately at 120 DPI, FamiTracker's instrument list is 9 instruments tall rather than 8 (due to rounding differences), breaking the groups. At 192 DPI, the list is 10 instruments tall!") }}
 
 ### Solution: showing placeholders?
 
