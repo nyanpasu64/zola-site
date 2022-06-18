@@ -53,6 +53,8 @@ fi
 main() {
     echo "Starting deploy..."
 
+    apk add --update-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/community/ zola
+
     git config --global url."https://".insteadOf git://
     ## $GITHUB_SERVER_URL is set as a default environment variable in all workflows, default is https://github.com
     git config --global url."$GITHUB_SERVER_URL/".insteadOf "git@${GITHUB_HOSTNAME}":
