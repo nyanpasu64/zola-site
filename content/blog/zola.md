@@ -23,6 +23,8 @@ I struggled to learn Zola at first, specifically piecing together the relationsh
 
 I would much rather require the project configuration to explicitly spell out which template is used for the site root, sections, and pages, so I can ***grep*** my project for template names like index.html and find a configuration line telling me which content files correspond to that template. (See [discussion on this topic](https://softwareengineering.stackexchange.com/questions/165649/is-convention-over-configuration-not-violating-basic-programming-principles).)
 
+TODO
+
 <!-- The relationship between index.md, \_index.md, and pages in my site, and section.html and page.html (and alternative template names) in the theme, was unclear. Since Googling for help didn't work well, I had to read through the docs from front to back to learn how the HTML files were organized. --> The docs were comprehensive and fairly clear, but the material was dense, and I had to consciously read, take notes, and stop reading whenever I found myself glazing over the pages. In any case, I now better know how to work with Zola, though I probably wouldn't be able to write a site config or theme from scratch.
 
 I removed comments because nobody used them anyway ;) and I didn't take the time to redo the Utterances integration.
@@ -37,9 +39,13 @@ Zola is a *lot* pickier about date formats than Jekyll, requiring either `yyyy-m
 
 ## Hosting
 
-You *can* run Zola on GitHub Pages ([docs](https://www.getzola.org/documentation/deployment/github-pages/))... but you need to use a GitHub action ([link](https://github.com/shalzz/zola-deploy-action)), and create a personal access token for it, so it can push compiled output to the `gh-pages` branch every time you push new data to a source branch.
+You *can* run Zola on GitHub Pages ([docs](https://www.getzola.org/documentation/deployment/github-pages/))... but you need to use a GitHub action ([link](https://github.com/shalzz/zola-deploy-action)) which force-pushes a single commit with compiled output to the `gh-pages` branch every time you push new data to a source branch. Strangely, the Zola docs say to create a personal access token and assign it to the `TOKEN` environment variable, whereas the action docs say to specify `GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` (`secrets.GITHUB_TOKEN` is created by GitHub on every job).
+
+TODO
 
 Interestingly, the unofficial [GitHub Pages action](https://github.com/marketplace/actions/github-pages-action) doesn't need a personal access token, but can use `GITHUB_TOKEN`, a job-local token ([link](https://docs.github.com/en/actions/security-guides/automatic-token-authentication)), with some limitations ([link](https://github.com/peaceiris/actions-gh-pages#%EF%B8%8F-first-deployment-with-github_token)).
+
+The zola-deploy-action script fails to create a `.nojekyll` file, unlike the github-pages-action script. This probably slows down deploying the resulting static site.
 
 GitLab doesn't require setting up an access token, and abstracts over the process (doesn't expose the generated html as a branch). I decided to host on GitLab pages, but may reconsider this decision.
 
@@ -47,7 +53,7 @@ GitLab doesn't require setting up an access token, and abstracts over the proces
 
 Zola is a good engine. The docs were quite comprehensive (though I did come across one piece of outdated information, which I [contributed a pull request to fix](https://github.com/getzola/zola/pull/1901)).
 
-The command line is *blazing fast*: it builds my entire blog in around 20-30 ms on my Ryzen 5 5600X desktop, and around 1 second on my aging Core 2 Duo laptop running Void Linux.
+The command line is *blazing fast*: it builds my entire blog in around 40-50 ms and rebuilds in 20-30 ms on my Ryzen 5 5600X desktop, and rebuilds in around 1 second on my aging Core 2 Duo laptop running Void Linux on a mechanical drive.
 
 <!-- ## The result -->
 
