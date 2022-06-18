@@ -77,6 +77,8 @@ main() {
         echo "Pushing artifacts to ${TARGET_REPOSITORY}:$remote_branch"
 
         cd ${OUT_DIR}
+        touch .nojekyll
+
         git init
         git config user.name "GitHub Actions"
         git config user.email "github-actions-bot@users.noreply.${GITHUB_HOSTNAME}"
