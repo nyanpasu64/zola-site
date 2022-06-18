@@ -53,14 +53,6 @@ fi
 main() {
     echo "Starting deploy..."
 
-    git config --global url."https://".insteadOf git://
-    ## $GITHUB_SERVER_URL is set as a default environment variable in all workflows, default is https://github.com
-    git config --global url."$GITHUB_SERVER_URL/".insteadOf "git@${GITHUB_HOSTNAME}":
-    if [[ "$BUILD_THEMES" ]]; then
-        echo "Fetching themes"
-        git submodule update --init --recursive
-    fi
-
     version=$(zola --version)
     remote_repo="https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@${GITHUB_HOSTNAME}/${TARGET_REPOSITORY}.git"
     remote_branch=$PAGES_BRANCH

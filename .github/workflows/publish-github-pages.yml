@@ -13,6 +13,8 @@ jobs:
     steps:
     - name: Checkout branch
       uses: actions/checkout@v3.0.0
+      with:
+        submodules: recursive
     - name: Build and deploy
       uses: ./.github/actions/zola-deploy-action
       env:
