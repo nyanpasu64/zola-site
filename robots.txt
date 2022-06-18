@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://nyanpasu64.gitlab.io/sitemap.xml

@@ -1,0 +1,928 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+	<title>nyanpasu64&#x27;s blog</title>
+	<subtitle>Adventures in programming, DSP, and chiptune</subtitle>
+	<link href="https://nyanpasu64.gitlab.io/atom.xml" rel="self" type="application/atom+xml"/>
+  <link href="https://nyanpasu64.gitlab.io"/>
+	<generator uri="https://www.getzola.org/">Zola</generator>
+	<updated>2022-06-14T00:00:00-07:00</updated>
+	<id>https://nyanpasu64.gitlab.io/atom.xml</id>
+	<entry xml:lang="en">
+		<title>Implementing low-latency shared&#x2F;exclusive mode audio output&#x2F;duplex</title>
+		<published>2022-06-14T00:00:00-07:00</published>
+		<updated>2022-06-14T00:00:00-07:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/low-latency-audio-output-duplex-alsa/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/low-latency-audio-output-duplex-alsa/</id>
+		<content type="html">&lt;p&gt;Audio output and duplex is actually quite tricky, and even libraries like RtAudio&#x27;s ALSA backend get it wrong. If you&#x27;re writing an app that needs low-latency audio without glitches, the proper implementation architecture differs between apps talking to pull-mode (well-designed, low-latency) mixing daemons, and apps talking to hardware. &lt;span id=&quot;continue-reading&quot;&gt;&lt;&#x2F;span&gt; (I hear push-mode mixing daemons are incompatible with low latency; I discuss this at the end.) This is my best understanding of the problem right now.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;prior-art&quot;&gt;Prior art&lt;&#x2F;h2&gt;
+&lt;p&gt;There are some previous resources on implementing ALSA duplex, but I find them to be unclear and&#x2F;or incomplete:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;git.alsa-project.org&#x2F;?p=alsa-lib.git;a=blob;f=test&#x2F;latency.c&quot;&gt;https:&#x2F;&#x2F;git.alsa-project.org&#x2F;?p=alsa-lib.git;a=blob;f=test&#x2F;latency.c&lt;&#x2F;a&gt;; gets the &amp;quot;write silence&amp;quot; part right but doesn&#x27;t explain what it&#x27;s doing, and the main loop is confusing.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;web.archive.org&#x2F;web&#x2F;20211003144458&#x2F;http:&#x2F;&#x2F;www.saunalahti.fi&#x2F;%7Es7l&#x2F;blog&#x2F;2005&#x2F;08&#x2F;21&#x2F;Full%20Duplex%20ALSA&quot;&gt;https:&#x2F;&#x2F;web.archive.org&#x2F;web&#x2F;20211003144458&#x2F;http:&#x2F;&#x2F;www.saunalahti.fi&#x2F;~s7l&#x2F;blog&#x2F;2005&#x2F;08&#x2F;21&#x2F;Full%20Duplex%20ALSA&lt;&#x2F;a&gt; gets the &amp;quot;write silence&amp;quot; part right, but doesn&#x27;t know &lt;em&gt;why&lt;&#x2F;em&gt; it&#x27;s necessary.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;a href=&quot;http:&#x2F;&#x2F;equalarea.com&#x2F;paul&#x2F;alsa-audio.html#duplexex&quot;&gt;http:&#x2F;&#x2F;equalarea.com&#x2F;paul&#x2F;alsa-audio.html#duplexex&lt;&#x2F;a&gt; says: &amp;quot;The the interrupt-driven example represents a fundamentally better design for many situations. It is, however, rather complex to extend to full duplex. This is why I suggest you forget about all of this... In a word: JACK.&amp;quot; However this doesn&#x27;t answer the question of how &lt;em&gt;JACK&lt;&#x2F;em&gt; itself implements full duplex audio.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;alsa-terminology&quot;&gt;ALSA terminology&lt;&#x2F;h2&gt;
+&lt;p&gt;These are some background terms which are helpful to understand before writing an audio backend.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Sample:&lt;&#x2F;strong&gt; one amplitude in a discrete-time signal, or the time interval between an ADC generating or DAC playing adjacent samples.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Frame:&lt;&#x2F;strong&gt; one sample of time, or one sample across all audio channels.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Period:&lt;&#x2F;strong&gt; Every time the hardware record&#x2F;play point advances by this many frames, the app is woken up to read or generate audio. In most ALSA apps, the hardware period determines the chunks of audio read, generated, or written.&lt;&#x2F;p&gt;
+&lt;p&gt;However you can read and write arbitrary chunks of audio anyway, and query the exact point where the hardware is writing or playing audio at any time, even between periods. For example, PulseAudio and PipeWire&#x27;s ALSA backends ignore&#x2F;disable periods altogether, and instead fetch and play audio based off a variable-interval OS timer loosely synchronized with the hardware&#x27;s write and play points.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;PipeWire (timer-based scheduling) experiences extra latency with batch devices (&lt;a href=&quot;https:&#x2F;&#x2F;gitlab.freedesktop.org&#x2F;pipewire&#x2F;pipewire&#x2F;-&#x2F;wikis&#x2F;FAQ#pipewire-buffering-explained&quot;&gt;link&lt;&#x2F;a&gt;), and PulseAudio used to turn off timer-based scheduling for batch devices (&lt;a href=&quot;https:&#x2F;&#x2F;www.alsa-project.org&#x2F;pipermail&#x2F;alsa-devel&#x2F;2014-March&#x2F;073816.html&quot;&gt;link&lt;&#x2F;a&gt;).&lt;&#x2F;li&gt;
+&lt;li&gt;On the other hand, Paul Davis says conventional &lt;em&gt;period-based&lt;&#x2F;em&gt; scheduling struggles &lt;em&gt;more&lt;&#x2F;em&gt; than timer-based (PulseAudio, PipeWire) for batch devices (&lt;a href=&quot;https:&#x2F;&#x2F;blog.linuxplumbersconf.org&#x2F;2009&#x2F;slides&#x2F;Paul-Davis-lpc2009.pdf&quot;&gt;link&lt;&#x2F;a&gt; @ &amp;quot;The Importance of Timing&amp;quot;). I&#x27;m not sure how to reconcile this.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;&lt;strong&gt;Batch device:&lt;&#x2F;strong&gt; Represented by &lt;code&gt;SNDRV_PCM_INFO_BATCH&lt;&#x2F;code&gt; in the Linux kernel. I&#x27;m not exactly sure what it means. &lt;a href=&quot;https:&#x2F;&#x2F;www.alsa-project.org&#x2F;pipermail&#x2F;alsa-devel&#x2F;2014-March&#x2F;073816.html&quot;&gt;https:&#x2F;&#x2F;www.alsa-project.org&#x2F;pipermail&#x2F;alsa-devel&#x2F;2014-March&#x2F;073816.html&lt;&#x2F;a&gt; says it&#x27;s a device where audio can only be sent to the device in period-sized chunks. &lt;a href=&quot;https:&#x2F;&#x2F;www.alsa-project.org&#x2F;pipermail&#x2F;alsa-devel&#x2F;2015-June&#x2F;094037.html&quot;&gt;https:&#x2F;&#x2F;www.alsa-project.org&#x2F;pipermail&#x2F;alsa-devel&#x2F;2015-June&#x2F;094037.html&lt;&#x2F;a&gt; is too complicated for me to understand.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Quantum:&lt;&#x2F;strong&gt; PipeWire&#x27;s app-facing equivalent to ALSA&#x2F;JACK periods.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Buffer size:&lt;&#x2F;strong&gt; the total amount of audio which an input ALSA device can buffer for an app to read, or can be buffered by an app for an output ALSA device to play. Always at least 2 periods long.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Available frames:&lt;&#x2F;strong&gt; The number of frames (channel-independent samples) of audio readable&#x2F;buffered (for input streams) or writable (for output streams).&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;&amp;quot;Buffered&amp;quot; frames:&lt;&#x2F;strong&gt; For input devices, this matches available (readable) frames. For output devices, this equals the buffer size minus available (writable) frames.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;hw devices, plugins, etc:&lt;&#x2F;strong&gt; See &lt;a href=&quot;https:&#x2F;&#x2F;www.volkerschatz.com&#x2F;noise&#x2F;alsa.html&quot;&gt;https:&#x2F;&#x2F;www.volkerschatz.com&#x2F;noise&#x2F;alsa.html&lt;&#x2F;a&gt;.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;minimum-achievable-input-output-duplex-latency&quot;&gt;Minimum achievable input&#x2F;output&#x2F;duplex latency&lt;&#x2F;h2&gt;
+&lt;p&gt;The minimum achievable audio latency at a given period size is achieved by having 2 periods of total capture&#x2F;playback buffering between hardware and a app (like JACK2, PipeWire, and well-designed ALSA apps).&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;If an audio daemon mixes audio from multiple apps, it can only avoid adding latency if there is no buffering (but instead synchronous execution) between the daemon and apps. JACK2 in synchronous mode and PipeWire support this, but pipewire-alsa fails this test by default, so ALSA is not a zero-latency way of talking to PipeWire.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;For duplex streams, the total round-trip (microphone-to-speaker) latency of a duplex stream is &lt;code&gt;N&lt;&#x2F;code&gt; periods (the maximum amount of buffered audio in the output buffer). &lt;code&gt;N&lt;&#x2F;code&gt; is always ≥ 2 and almost always an integer.&lt;&#x2F;p&gt;
+&lt;p&gt;For capture and duplex streams, there are &lt;code&gt;0&lt;&#x2F;code&gt; to &lt;code&gt;1&lt;&#x2F;code&gt; periods of capture (microphone-to-screen) latency (since microphone input can occur at any time, but is always processed at period boundaries).&lt;&#x2F;p&gt;
+&lt;p&gt;For playback and duplex streams, there are &lt;code&gt;N-1&lt;&#x2F;code&gt; to &lt;code&gt;N&lt;&#x2F;code&gt; periods of playback (keyboard-to-speaker) latency (since keyboard input can occur at any point, but is always converted into audio at period boundaries).&lt;&#x2F;p&gt;
+&lt;p&gt;These values only include delay caused by audio buffers, and exclude extra latency in the input stack, display stack, sound drivers, resamplers, or ADC&#x2F;DAC.&lt;&#x2F;p&gt;
+&lt;p&gt;Note that this article doesn&#x27;t cover the advantages of extra buffering, like smoothing over hitches, or JACK2 async mode ensuring that an app that stalls won&#x27;t cause the system audio and all apps to xrun. I have not studied JACK2 async mode though.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;avoid-blocking-writes-both-exclusive-and-shared-output-only&quot;&gt;Avoid blocking writes (both exclusive and shared, output only)&lt;&#x2F;h2&gt;
+&lt;p&gt;If your app generates one output period of audio at a time and you want to minimize keypress-to-audio latency, regardless if your app outputs to hardware devices or pull-mode daemons, it should never rely on blocking writes to act as output backpressure. Instead it should wait until 1 period of audio is writable, &lt;em&gt;then&lt;&#x2F;em&gt; generate 1 period of audio and nonblocking-write it. (This does not apply to duplex apps, since waiting for available &lt;em&gt;input&lt;&#x2F;em&gt; data effectively acts as &lt;em&gt;output&lt;&#x2F;em&gt; throttling.)&lt;&#x2F;p&gt;
+&lt;p&gt;If your app generates audio &lt;em&gt;before&lt;&#x2F;em&gt; performing blocking writes for throttling, you will generate a new period of audio as soon as the previous period of audio is written (a full period of real time before a new period of audio is writable). This audio gets buffered for an extra period (while &lt;code&gt;snd_pcm_writei()&lt;&#x2F;code&gt; blocks) before reaching the speakers, so &lt;strong&gt;external (eg. keyboard) input takes a period longer to be audible.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;(Note that avoiding blocking writes isn&#x27;t necessarily beneficial if you don&#x27;t generate and play audio in chunks synchronized with output periods.)&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Issue:&lt;&#x2F;strong&gt; RtAudio relies on blocking &lt;code&gt;snd_pcm_writei&lt;&#x2F;code&gt; in pure-output streams. This adds 1 period of keyboard-to-speaker latency to output streams. (It also relies on blocking &lt;code&gt;snd_pcm_writei&lt;&#x2F;code&gt; for duplex streams, but this is essentially harmless since RtAudio first blocks on &lt;code&gt;snd_pcm_readi&lt;&#x2F;code&gt;, and by the time the function returns, if the input and output streams are synchronized &lt;code&gt;snd_pcm_writei&lt;&#x2F;code&gt; is effectively a nonblocking write call.)&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;alsa-blocking-reads-writes-vs-snd-pcm-wait-vs-poll&quot;&gt;ALSA: blocking reads&#x2F;writes vs. snd_pcm_wait() vs. poll()&lt;&#x2F;h3&gt;
+&lt;p&gt;Making a blocking call to &lt;code&gt;snd_pcm_readi()&lt;&#x2F;code&gt; before generating sound is basically fine and does not add latency relative to nonblocking reads (&lt;code&gt;snd_pcm_sw_params_set_avail_min(1 period)&lt;&#x2F;code&gt; during setup, and calling &lt;code&gt;snd_pcm_wait()&lt;&#x2F;code&gt; before every read).&lt;&#x2F;p&gt;
+&lt;p&gt;On the other hand, generating sound then making a blocking call to &lt;code&gt;snd_pcm_writei()&lt;&#x2F;code&gt; (in output-only streams) adds a full period of keyboard-to-speaker latency relative to nonblocking writes (&lt;code&gt;snd_pcm_sw_params_set_avail_min(unused_buffer_size + 1 period)&lt;&#x2F;code&gt; during setup, and calling &lt;code&gt;snd_pcm_wait()&lt;&#x2F;code&gt; before generating and writing audio).&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;poll()&lt;&#x2F;code&gt; has the same latency as &lt;code&gt;snd_pcm_wait()&lt;&#x2F;code&gt; and is more difficult to setup. The advantage is that you can pass in an extra file descriptor, allowing the main thread to interrupt the audio thread if &lt;code&gt;poll&#x2F;snd_pcm_wait()&lt;&#x2F;code&gt; is stuck waiting on a stalled ALSA device. (I&#x27;m not sure if stalled ALSA is common, but I&#x27;ve seen stalled shared-mode WASAPI happen.)&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;avoid-buffering-shared-output-streams-output-and-duplex&quot;&gt;Avoid buffering shared output streams (output and duplex)&lt;&#x2F;h2&gt;
+&lt;p&gt;Most apps use shared-mode streams, since exclusive-mode streams take up an entire audio device, preventing other apps from playing sound. Shared-mode streams generally communicate with a userspace audio daemon&lt;sup class=&quot;footnote-reference&quot;&gt;&lt;a href=&quot;#1&quot;&gt;1&lt;&#x2F;a&gt;&lt;&#x2F;sup&gt;, which is responsible for mixing audio from various programs and feeding it into hardware sound buffers, and ideally even routing audio from app to app.&lt;&#x2F;p&gt;
+&lt;div class=&quot;footnote-definition&quot; id=&quot;1&quot;&gt;&lt;sup class=&quot;footnote-definition-label&quot;&gt;1&lt;&#x2F;sup&gt;
+&lt;p&gt;ALSA dmix may be kernel-based. I&#x27;m not sure, and I haven&#x27;t looked into it.&lt;&#x2F;p&gt;
+&lt;&#x2F;div&gt;
+&lt;p&gt;If an app needs a output-only or duplex shared-mode stream, and must avoid unnecessary output latency, it should not buffer output audio itself (or generate audio &lt;em&gt;before&lt;&#x2F;em&gt; performing a blocking write, discussed above). Instead it should wait for the daemon to request output audio (and optionally provide input audio), &lt;em&gt;then&lt;&#x2F;em&gt; generate output audio and send it to the daemon. This minimizes output latency, and in the case of duplex streams, enables &lt;em&gt;zero-latency&lt;&#x2F;em&gt; app chaining between apps in an audio graph! To achieve this, the pull-mode mixing daemon (for example JACK2 or PipeWire) requests audio from the first app, and synchronously passes it to later apps within the &lt;em&gt;same period&lt;&#x2F;em&gt; of real-world time. Sending audio through two apps in series has zero added latency compared to sending audio through one app. The downside is that if you chain too many apps, JACK2 can&#x27;t finish ticking all the apps in a single period, and fails to output audio to the speakers in time, resulting in an audio glitch or xrun.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Issue:&lt;&#x2F;strong&gt; Any ALSA app talking to pulseaudio-alsa or pipewire-alsa (and possibly any PulseAudio app talking to pipewire-pulse) will perform extra buffering. Hopefully RtAudio, PortAudio, etc. will all add PipeWire backends someday (SDL2 already has it: &lt;a href=&quot;https:&#x2F;&#x2F;www.phoronix.com&#x2F;scan.php?page=news_item&amp;amp;px=SDL2-Lands-PipeWire-Audio&quot;&gt;https:&#x2F;&#x2F;www.phoronix.com&#x2F;scan.php?page=news_item&amp;amp;px=SDL2-Lands-PipeWire-Audio&lt;&#x2F;a&gt;).&lt;&#x2F;p&gt;
+&lt;p&gt;As a result, for the remainder of the article, I will be focusing on using ALSA to talk to &lt;em&gt;hardware&lt;&#x2F;em&gt; devices.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;buffer-1-2-periods-in-exclusive-output-streams-output-and-duplex&quot;&gt;Buffer 1-2 periods in exclusive output streams (output and duplex)&lt;&#x2F;h2&gt;
+&lt;p&gt;It is useful for some apps to open hardware devices directly (such that no other app can output or even receive audio), using exclusive-mode APIs like ALSA. These apps include audio daemons like PipeWire and JACK2 (which mix audio output from multiple shared-mode apps), or DAWs (which occupy an entire audio device for low-latency low-overhead audio recording and playback).&lt;&#x2F;p&gt;
+&lt;p&gt;Apps which open hardware in exclusive mode must handle output timing in real-world time themselves. They must read input audio as the hardware writes it into buffers, and send output audio to the buffers &lt;em&gt;ahead&lt;&#x2F;em&gt; of the hardware playing it back.&lt;&#x2F;p&gt;
+&lt;p&gt;In well-designed duplex apps that talk to hardware, such as jack2 talking to ALSA, the general approach is:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Pick a mic-to-speaker delay (called &lt;code&gt;used_buffer_size&lt;&#x2F;code&gt; and measured in frames).&lt;&#x2F;li&gt;
+&lt;li&gt;Pick a period size, which divides &lt;code&gt;used_buffer_size&lt;&#x2F;code&gt; into &lt;code&gt;N&lt;&#x2F;code&gt; periods. &lt;code&gt;N&lt;&#x2F;code&gt; is usually an integer ≥ 2.&lt;&#x2F;li&gt;
+&lt;li&gt;Tell ALSA to allocate an input and output buffer, each of size ≥ &lt;code&gt;used_buffer_size&lt;&#x2F;code&gt;, each with the correct period size.&lt;&#x2F;li&gt;
+&lt;li&gt;Write &lt;code&gt;used_buffer_size&lt;&#x2F;code&gt; frames of silence to the output&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Then loop:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;wait for 1 period&#x2F;block of input to be available&#x2F;readable, and 1 period&#x2F;block of output to play and be available&#x2F;writable. JACK2 uses &lt;code&gt;poll()&lt;&#x2F;code&gt;, if you don&#x27;t need cancellation you can use &lt;code&gt;snd_pcm_wait()&lt;&#x2F;code&gt; or even blocking &lt;code&gt;snd_pcm_readi()&lt;&#x2F;code&gt;.&lt;&#x2F;li&gt;
+&lt;li&gt;read 1 period of input, and pass it to the user callback which generates 1 period of output&lt;&#x2F;li&gt;
+&lt;li&gt;write 1 period of output into the available&#x2F;writable room&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;implementing-exclusive-mode-duplex-like-jack2&quot;&gt;Implementing exclusive-mode duplex like JACK2&lt;&#x2F;h2&gt;
+&lt;p&gt;JACK2&#x27;s ALSA backend, and this guide, assume the input and output device in a duplex pair share the same underlying sample clock and never go out of sync. Calling &lt;code&gt;snd_pcm_link()&lt;&#x2F;code&gt; on two streams is supposed to succeed if and only if they share the same sample clock, buffer size and period count, etc. (the exact criteria are undocumented, and I didn&#x27;t read the kernel source yet). If it succeeds, it not only starts and stops the streams together, but is supposed to synchronize the input&#x27;s write pointer and the output&#x27;s read pointer.&lt;&#x2F;p&gt;
+&lt;p&gt;PipeWire supports rate-matching resampling (&lt;a href=&quot;https:&#x2F;&#x2F;gitlab.freedesktop.org&#x2F;pipewire&#x2F;pipewire&#x2F;-&#x2F;wikis&#x2F;FAQ#how-are-multiple-devices-handled&quot;&gt;link&lt;&#x2F;a&gt;), but (like timer-based scheduling) it introduces a great deal of complexity (&lt;em&gt;heuristic&lt;&#x2F;em&gt; clock skew estimation, resampling latency compensation), which I have not studied, is out of scope for opening a simple duplex stream, and &lt;em&gt;actively detracts&lt;&#x2F;em&gt; from learning the fundamentals.&lt;&#x2F;p&gt;
+&lt;p&gt;Note that &lt;code&gt;unused_buffer_size &amp;gt; 0&lt;&#x2F;code&gt; is also incidental complexity, and not essential to understanding the concepts. Normally &lt;code&gt;buffer_size = N periods&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;On ALSA, you can implement full duplex period-based audio by:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Optionally(?) open input and output &lt;code&gt;snd_pcm_t&lt;&#x2F;code&gt; in &lt;code&gt;SND_PCM_NONBLOCK&lt;&#x2F;code&gt;.&lt;&#x2F;li&gt;
+&lt;li&gt;Setup both the input and output streams with &lt;code&gt;N&lt;&#x2F;code&gt; periods of audio. &lt;code&gt;N&lt;&#x2F;code&gt; is selected by the user, and is usually 2-4. (If the device only supports &lt;code&gt;&amp;gt;N&lt;&#x2F;code&gt; periods of audio, JACK2 can open the device with &lt;code&gt;&amp;gt;N&lt;&#x2F;code&gt; periods, but simulate &lt;code&gt;N&lt;&#x2F;code&gt; periods of latency by never filling the output device beyond &lt;code&gt;N&lt;&#x2F;code&gt; periods.)&lt;&#x2F;li&gt;
+&lt;li&gt;Let &lt;code&gt;used_buffer_size = N periods&lt;&#x2F;code&gt; (in frames). This equals the total &lt;code&gt;buffer_size&lt;&#x2F;code&gt; unless the device only supports &lt;code&gt;&amp;gt;N&lt;&#x2F;code&gt; periods.&lt;&#x2F;li&gt;
+&lt;li&gt;Let &lt;code&gt;unused_buffer_size = buffer_size - used_buffer_size&lt;&#x2F;code&gt; (in frames). This equals 0 unless the device only supports &lt;code&gt;&amp;gt;N&lt;&#x2F;code&gt; periods.&lt;&#x2F;li&gt;
+&lt;li&gt;Set up the input and output streams, so software waiting&#x2F;polling will wake up when the hardware writes or reads the correct amount of data.
+&lt;ul&gt;
+&lt;li&gt;For the input stream, we want to read as soon as 1 period of data is readable&#x2F;available, so call &lt;code&gt;snd_pcm_sw_params_set_avail_min(1 period)&lt;&#x2F;code&gt;. You can skip this call if you open the device without &lt;code&gt;SND_PCM_NONBLOCK&lt;&#x2F;code&gt; and use blocking &lt;code&gt;snd_pcm_readi&lt;&#x2F;code&gt;, but to my knowledge &lt;code&gt;snd_pcm_sw_params_set_avail_min()&lt;&#x2F;code&gt; is not optional in the lower-overhead mmap mode.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;The output stream is more complicated if &lt;code&gt;unused_buffer_size != 0&lt;&#x2F;code&gt;.
+&lt;ul&gt;
+&lt;li&gt;We want to write 1 period of audio once &lt;code&gt;buffered ≤ used_buffer_size - 1 period&lt;&#x2F;code&gt; (in frames). And we know &lt;code&gt;writable&#x2F;available = buffer_size - buffered&lt;&#x2F;code&gt;. So we want to write audio once &lt;code&gt;writable&#x2F;available ≥ unused_buffer_size + 1 period&lt;&#x2F;code&gt;.&lt;&#x2F;li&gt;
+&lt;li&gt;Call &lt;code&gt;snd_pcm_sw_params_set_avail_min(unused_buffer_size + 1 period)&lt;&#x2F;code&gt;, so polling&#x2F;waiting on the output stream will unblock once that much audio is writable.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;For duplex streams, write &lt;code&gt;N&lt;&#x2F;code&gt; periods of silence. This can be skipped for output-only streams, but JACK2 does it for those too.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;snd_pcm_start()&lt;&#x2F;code&gt; the input stream if available, and the output stream if available and not linked to the input.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;And in the audio loop:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Either call &lt;code&gt;poll()&lt;&#x2F;code&gt; (like JACK2, can wait on multiple fds) or &lt;code&gt;snd_pcm_wait&lt;&#x2F;code&gt; (simpler, synchronous), to wait until 1 period of room is readable from the input stream and writable to the output stream (excluding &lt;code&gt;unused_buffer_size&lt;&#x2F;code&gt;).
+&lt;ul&gt;
+&lt;li&gt;At this point, we have &lt;code&gt;N-1&lt;&#x2F;code&gt; periods of time to generate audio, before the input buffer runs out of room for capturing audio and the output runs out of buffered audio to play. This is why &lt;code&gt;N&lt;&#x2F;code&gt; must be greater than 1; if not we have &lt;em&gt;no&lt;&#x2F;em&gt; time to generate 1 period of audio to play.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Read 1 period of audio from the input buffer, generate 1 period of output audio, and write it to the output buffer.
+&lt;ul&gt;
+&lt;li&gt;Now the output buffer holds &lt;code&gt;≤ used_buffer_size&lt;&#x2F;code&gt; frames, leaving &lt;code&gt;≥ unused_buffer_size&lt;&#x2F;code&gt; room writable&#x2F;available.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h3 id=&quot;rtaudio-gets-duplex-wrong-can-have-xruns-and-glitches&quot;&gt;RtAudio gets duplex wrong, can have xruns and glitches&lt;&#x2F;h3&gt;
+&lt;p&gt;&lt;strong&gt;Issue:&lt;&#x2F;strong&gt; RtAudio opens and polls an ALSA duplex stream (in this case, duplex.cpp with &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;nyanpasu64&#x2F;rtaudio&#x2F;tree&#x2F;alsa-duplex-buffering&quot;&gt;extra debug prints added&lt;&#x2F;a&gt;, opening my motherboard&#x27;s hw device) by:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Don&#x27;t fill the output with silence.&lt;&#x2F;li&gt;
+&lt;li&gt;Call &lt;code&gt;snd_pcm_sw_params_set_start_threshold()&lt;&#x2F;code&gt; on both streams (though RtAudio only triggers on the input, which starts both streams).&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;snd_pcm_link()&lt;&#x2F;code&gt; the input and output streams so they both start at the same time. Setup the streams the same way regardless if it succeeds or fails. (On my motherboard audio, it succeeds.)&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Then loop:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Call &lt;code&gt;snd_pcm_readi(1 period)&lt;&#x2F;code&gt; of input (blocking until available), and pass it to the user callback which generates 1 period of output.
+&lt;ul&gt;
+&lt;li&gt;Because RtAudio calls &lt;code&gt;snd_pcm_sw_params_set_start_threshold&lt;&#x2F;code&gt; on the input stream, and the two streams are linked, &lt;code&gt;snd_pcm_readi()&lt;&#x2F;code&gt; starts both the input and output streams &lt;em&gt;immediately&lt;&#x2F;em&gt; (upon call, not upon return). The output stream is started with no data inside, and tries to play the absence of data. It&#x27;s a miracle it doesn&#x27;t xrun immediately.&lt;&#x2F;li&gt;
+&lt;li&gt;Once the input stream has 1 period of input, &lt;code&gt;snd_pcm_readi&lt;&#x2F;code&gt; returns. By this point, the output stream has more &lt;code&gt;snd_pcm_avail()&lt;&#x2F;code&gt; than the total buffer size, and &lt;em&gt;negative&lt;&#x2F;em&gt; &lt;code&gt;snd_pcm_delay()&lt;&#x2F;code&gt;, yet &lt;em&gt;somehow&lt;&#x2F;em&gt; it does not xrun on the first &lt;code&gt;snd_pcm_writei()&lt;&#x2F;code&gt;.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Call &lt;code&gt;snd_pcm_writei(1 period)&lt;&#x2F;code&gt; of output. This does not block since there are three periods available&#x2F;writable (or two if the input&#x2F;output streams are not linked).
+&lt;ul&gt;
+&lt;li&gt;This is supposed to be called when there is 1 period of empty&#x2F;available space in the buffer to write to. Instead it&#x27;s called when there is 1 period of empty space &lt;em&gt;more&lt;&#x2F;em&gt; than the entire buffer size! I don&#x27;t understand how ALSA even allows this.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h3 id=&quot;fixing-rtaudio-output-and-duplex&quot;&gt;Fixing RtAudio output and duplex&lt;&#x2F;h3&gt;
+&lt;p&gt;To resolve this for duplex streams, the easiest approach is to change stream starting:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Write 1 full buffer (or the used portion) of silence into the output.&lt;&#x2F;li&gt;
+&lt;li&gt;Don&#x27;t call &lt;code&gt;snd_pcm_sw_params_set_start_threshold()&lt;&#x2F;code&gt; on the output stream of a duplex pair. Instead use &lt;code&gt;snd_pcm_link()&lt;&#x2F;code&gt; to start the output stream upon the first input read (or if &lt;code&gt;snd_pcm_link()&lt;&#x2F;code&gt; fails, start the output stream yourself before the first input read).&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;This approach fails for output-only streams. To resolve the issue in both duplex and output streams, you must:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Call &lt;code&gt;snd_pcm_sw_params_set_avail_min(unused_buffer_size + 1 period)&lt;&#x2F;code&gt; before starting the output stream.&lt;&#x2F;li&gt;
+&lt;li&gt;Call &lt;code&gt;snd_pcm_wait()&lt;&#x2F;code&gt; (or &lt;code&gt;poll()&lt;&#x2F;code&gt;) on the output stream every period, &lt;em&gt;before&lt;&#x2F;em&gt; generating audio.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;I haven&#x27;t looked into how RtAudio stops ALSA streams (with or without &lt;code&gt;snd_pcm_link()&lt;&#x2F;code&gt;), then starts them again, and what happens if you call them quickly enough that the buffers haven&#x27;t fully drained yet.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;optional-replacing-blocking-reads-writes-with-cancellable-polling&quot;&gt;(optional) Replacing blocking reads&#x2F;writes with cancellable polling&lt;&#x2F;h2&gt;
+&lt;p&gt;RtAudio needs to use polling to avoid extra latency in output-only streams. Should it be used for duplex and input-only streams as well? Is it worth adding an extra pollfd for cancelling blocking writes (possibly replacing the condvar)?&lt;&#x2F;p&gt;
+&lt;p&gt;I don&#x27;t know how to refactor RtAudio to allow cancelling a blocked &lt;code&gt;snd_pcm_readi&#x2F;writei&lt;&#x2F;code&gt;. Maybe pthread cancellation is sufficient, I don&#x27;t know. If not, one JACK2 and cpal-inspired approach is:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Open all &lt;code&gt;snd_pcm_t&lt;&#x2F;code&gt; in &lt;code&gt;SND_PCM_NONBLOCK&lt;&#x2F;code&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;Fetch fds for each &lt;code&gt;snd_pcm_t&lt;&#x2F;code&gt; using &lt;code&gt;snd_pcm_poll_descriptors()&lt;&#x2F;code&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;Share an interrupt pipefd&#x2F;eventfd between the GUI and audio thread&lt;&#x2F;li&gt;
+&lt;li&gt;In the audio callback:
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;poll()&lt;&#x2F;code&gt; the input, output, and interrupt fds&lt;&#x2F;li&gt;
+&lt;li&gt;Pass the result into &lt;code&gt;snd_pcm_poll_descriptors_revents()&lt;&#x2F;code&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;Only perform non-blocking PCM reads&#x2F;writes, or exit the loop if the interrupt fd is signalled.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Unfortunately this requires a pile of refactoring for relatively little gain.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;is-rtaudio-s-current-approach-appropriate-for-low-latency-pipewire-alsa&quot;&gt;Is RtAudio&#x27;s current approach appropriate for low-latency pipewire-alsa?&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;strong&gt;Update: No.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;pipewire-alsa in its current form (&lt;a href=&quot;https:&#x2F;&#x2F;gitlab.freedesktop.org&#x2F;pipewire&#x2F;pipewire&#x2F;-&#x2F;commit&#x2F;774ade1467b8c68ac9646624d941be994bd3702b&quot;&gt;774ade146&lt;&#x2F;a&gt;) is wholly unsuitable for low-latency audio.&lt;&#x2F;p&gt;
+&lt;p&gt;I use &lt;code&gt;jack_iodelay&lt;&#x2F;code&gt; to measure signal latency, by using Helvum (a PipeWire graph editor) to route &lt;code&gt;jack_iodelay&lt;&#x2F;code&gt;&#x27;s output (which generates audio) through other nodes (which should pass-through audio with a delay) and back into its input (which measures audio and determines latency). When &lt;code&gt;jack_iodelay&lt;&#x2F;code&gt; is routed through hardware alone, it reports the usual 2 periods&#x2F;quantums of latency. When I start RtAudio&#x27;s ALSA duplex app with period matched to the PipeWire quantum (which should add only 1 period of latency since &lt;code&gt;snd_pcm_link()&lt;&#x2F;code&gt; fails), and route &lt;code&gt;jack_iodelay&lt;&#x2F;code&gt; through hardware and duplex in series, &lt;code&gt;jack_iodelay&lt;&#x2F;code&gt; reports a whopping 7 periods of latency. My guess is that pipewire-alsa adds a full 2 periods of buffering to both its input and output streams. I&#x27;m not sure if I have the motivation to understand and fix it.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Earlier:&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;RtAudio doesn&#x27;t write silence to the output of a duplex stream before starting the streams, and only writes to the output stream once one period of data arrives at the input stream. This is unambiguously wrong for hw device streams. Is it the best way to achieve zero-latency alsa passthrough, when using the pipewire-alsa ALSA plugin? I don&#x27;t know if it works or if the output stream xruns, I don&#x27;t know if this is contractually guaranteed to work, and I&#x27;d have to test it and read the pipewire-alsa source (&lt;a href=&quot;https:&#x2F;&#x2F;gitlab.freedesktop.org&#x2F;pipewire&#x2F;pipewire&#x2F;-&#x2F;blob&#x2F;master&#x2F;pipewire-alsa&#x2F;alsa-plugins&#x2F;pcm_pipewire.c&quot;&gt;link&lt;&#x2F;a&gt;).&lt;&#x2F;p&gt;
+&lt;p&gt;Is it possible to achieve low-latency &lt;em&gt;output-only&lt;&#x2F;em&gt; ALSA, perhaps by waiting until the buffer is entirely empty (&lt;code&gt;snd_pcm_sw_params_set_avail_min()&lt;&#x2F;code&gt;)? Again I don&#x27;t know, and I&#x27;d have to test.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;push-mode-audio-loses-the-battle-before-it-s-even-fought&quot;&gt;Push-mode audio loses the battle before it&#x27;s even fought&lt;&#x2F;h2&gt;
+&lt;p&gt;I hear push-mode mixing daemons like PulseAudio (or possibly WASAPI) are fundamentally bad designs, incompatible with low-latency or consistent-latency audio output.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;superpowered.com&#x2F;androidaudiopathlatency&quot;&gt;https:&#x2F;&#x2F;superpowered.com&#x2F;androidaudiopathlatency&lt;&#x2F;a&gt; (&lt;a href=&quot;https:&#x2F;&#x2F;news.ycombinator.com&#x2F;item?id=9386994&quot;&gt;discussion&lt;&#x2F;a&gt;) is an horror story. In fact I read elsewhere that pre-AAudio Android duplex loopback latency is &lt;em&gt;different&lt;&#x2F;em&gt; on every run; I can no longer recall the source, but it&#x27;s entirely consistent with the user application&#x27;s own ring buffering, or if input and output streams were started separately and not started and run in sync at a driver level like &lt;code&gt;snd_pcm_link&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Note that Android audio may have improved since then, see AAudio and &lt;a href=&quot;https:&#x2F;&#x2F;android-developers.googleblog.com&#x2F;2021&#x2F;03&#x2F;an-update-on-androids-audio-latency.html&quot;&gt;https:&#x2F;&#x2F;android-developers.googleblog.com&#x2F;2021&#x2F;03&#x2F;an-update-on-androids-audio-latency.html&lt;&#x2F;a&gt;.&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>The missing guide for Arch Linux PKGBUILD&#x27;s pkgver() version numbers</title>
+		<published>2021-08-13T07:21:00-07:00</published>
+		<updated>2021-08-13T07:21:00-07:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/the-missing-guide-for-arch-linux-pkgbuild-s-pkgver-version-numbers/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/the-missing-guide-for-arch-linux-pkgbuild-s-pkgver-version-numbers/</id>
+		<content type="html">&lt;p&gt;Pacman&#x27;s version comparison algorithm was designed over a decade ago to properly sort many categories of real-world version numbers, and is now set in stone, quirks and all. Later on, the AUR developed &lt;code&gt;pkgver()&lt;&#x2F;code&gt; conventions and templates which turn Git commits into version numbers that would sort properly in Pacman. But what are Pacman&#x27;s requirements for sorting real-world version numbers, how does Pacman&#x27;s version comparison algorithm work, and how are AUR &lt;code&gt;pkgver()&lt;&#x2F;code&gt; built around the algorithm?&lt;&#x2F;p&gt;
+&lt;h1 id=&quot;how-pacman-compares-versions&quot;&gt;How Pacman compares versions&lt;&#x2F;h1&gt;
+&lt;p&gt;&lt;code&gt;vercmp&lt;&#x2F;code&gt; is a command-line utility which takes two string arguments and compares them using Pacman&#x27;s version comparison algorithm.&lt;&#x2F;p&gt;
+&lt;p&gt;The &lt;code&gt;vercmp&lt;&#x2F;code&gt; executable exposes the algorithm used by Pacman to determine whether a different package version is newer than what you have currently installed. Sadly, https:&#x2F;&#x2F;man.archlinux.org&#x2F;man&#x2F;vercmp.8 (as well as the pacman manpage) is inadequate and fails to explain the algorithm, only providing a few examples.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;requirements-for-comparing-versions&quot;&gt;Requirements for comparing versions&lt;&#x2F;h2&gt;
+&lt;p&gt;Pacman needs to compare the versions of real-world software programs and its own conventions correctly:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;1.0-beta &amp;lt; 1.0 (from semver)
+&lt;ul&gt;
+&lt;li&gt;pacman and vercmp fail to fulfill this requirement, because it interprets &lt;code&gt;-beta&lt;&#x2F;code&gt; as build metadata (see &lt;code&gt;parseEVR()&lt;&#x2F;code&gt; &lt;code&gt;-release&lt;&#x2F;code&gt;).&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;1.0beta &amp;lt; 1.0 (Arch labels pre-release packages as 1.0beta rather than 1.0-beta)&lt;&#x2F;li&gt;
+&lt;li&gt;1.0 &amp;lt; 1.0.1&lt;&#x2F;li&gt;
+&lt;li&gt;1.0.1 &amp;lt; 1.0.2&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Pacman&#x27;s version comparison algorithm also has incidental properties that I don&#x27;t consider to be first principles. However, AUR &lt;code&gt;pkgver()&lt;&#x2F;code&gt; depend on certain ones to generate unusual-looking unintuitive version numbers that nonetheless sort properly in Pacman.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;1.0 &amp;lt; 1.0.0 (I think they should be equal)&lt;&#x2F;li&gt;
+&lt;li&gt;alpha &amp;lt; beta &amp;lt; 1.0&lt;&#x2F;li&gt;
+&lt;li&gt;1.0 &amp;lt; 1.0.alpha (it&#x27;s strange that 1.0 &amp;lt; 1.0.alpha &amp;lt; 1.0.0)&lt;&#x2F;li&gt;
+&lt;li&gt;1.0.alpha &amp;lt; 1.0.0&lt;&#x2F;li&gt;
+&lt;li&gt;1.0.alpha &amp;lt; 1.0.1&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;algorithm-implementation&quot;&gt;Algorithm implementation&lt;&#x2F;h2&gt;
+&lt;p&gt;The algorithm is implemented in &lt;code&gt;alpm_pkg_vercmp()&lt;&#x2F;code&gt; in the Pacman source code (&lt;a href=&quot;https:&#x2F;&#x2F;gitlab.archlinux.org&#x2F;pacman&#x2F;pacman&#x2F;-&#x2F;blob&#x2F;master&#x2F;lib&#x2F;libalpm&#x2F;version.c&quot;&gt;&lt;code&gt;:lib&#x2F;libalpm&#x2F;version.c&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;). The file is 260 lines of code, with multiple functions dedicated to different aspects of version comparison. The algorithm is written in raw C, with &lt;em&gt;glorious&lt;&#x2F;em&gt; null-terminated strings, and string slicing implemented via &lt;code&gt;const&lt;&#x2F;code&gt;-incompatible null byte insertion. 😿&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;epoch-version-and-release&quot;&gt;Epoch, version, and release&lt;&#x2F;h3&gt;
+&lt;p&gt;&lt;code&gt;parseEVR()&lt;&#x2F;code&gt; parses Arch package versions using the format &lt;code&gt;[epoch:]version[-release]&lt;&#x2F;code&gt;. More specifically, all characters after the last hyphen form the release (even if there are colons afterwards), and the epoch is &amp;quot;0&amp;quot; unless the first non-digit is a colon. If no epoch is present, the epoch is labeled as 0.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;parseEVR()&lt;&#x2F;code&gt; allows only numbers in the epoch field. It is usually absent, but can be used as a &amp;quot;major version&amp;quot; to ensure that newer program versions compare higher, even if the newer program&#x27;s version number (stored in the version field) is &lt;em&gt;lower&lt;&#x2F;em&gt; than in older versions.&lt;&#x2F;p&gt;
+&lt;p&gt;The release field is an optional location for &amp;quot;build metadata&amp;quot;. A version with no release field is considered equal to otherwise-identical versions with any release field, but two otherwise-identical versions with different release fields use the release field to break ties.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;comparing-versions&quot;&gt;Comparing versions&lt;&#x2F;h3&gt;
+&lt;p&gt;Each field is then compared using &lt;code&gt;rpmvercmp()&lt;&#x2F;code&gt;. Missing epochs are assumed to be 0, and missing releases are assumed to be equal to any numbered release.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;rpmvercmp()&lt;&#x2F;code&gt; decomposes its input into &amp;quot;segments&amp;quot;, where each segment starts with 0 or more &amp;quot;separator&amp;quot; characters (any non-alphanumeric character), which are followed by 1 or more &amp;quot;body&amp;quot; characters (each body contains either alphabetic characters or numeric characters, so &amp;quot;1a&amp;quot; is 2 segments). The input may be terminated by a &amp;quot;dangling&amp;quot; segment with only separator characters and no body (but realistic version numbers will not have a dangling segment).&lt;&#x2F;p&gt;
+&lt;p&gt;This can be modeled as the regex &lt;code&gt;([^a-zA-Z0-9]* ([a-zA-Z]+ | [0-9]+) )* [^a-zA-Z0-9]*&lt;&#x2F;code&gt; more or less.&lt;&#x2F;p&gt;
+&lt;p&gt;Both inputs are split into segments (including dangling segments), starting at the beginning. The algorithm loops over segments from both inputs, starting with the first segment from each, until either input runs out of segments entirely (one or both segments are absent).&lt;&#x2F;p&gt;
+&lt;p&gt;Each loop iteration receives one segment from each version, for as long as both versions have segments remaining:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;All leading separators are trimmed off both segments. Results:
+&lt;ul&gt;
+&lt;li&gt;1.1 = 1_1&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;If either segment is empty after trimming separators (because it&#x27;s a dangling segment), the loop breaks.&lt;&#x2F;li&gt;
+&lt;li&gt;If one segment started with more separator characters, it&#x27;s a larger version. Note that the Pacman developers believe that realistic version numbers do not have multiple separator characters in a row, and Pacman isn&#x27;t designed to handle this situation perfectly. Results:
+&lt;ul&gt;
+&lt;li&gt;1 &amp;lt; .1 = _1 &amp;lt; ..1&lt;&#x2F;li&gt;
+&lt;li&gt;1.1 &amp;lt; 1..1&lt;&#x2F;li&gt;
+&lt;li&gt;1.a &amp;lt; 1..a&lt;&#x2F;li&gt;
+&lt;li&gt;1rev &amp;lt; 1.rev &amp;lt; 1..rev&lt;&#x2F;li&gt;
+&lt;li&gt;a10 &amp;lt; a.10&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Alphabetic segments are sorted lexicographically, and sort before numeric segments (sorted numerically). Results:
+&lt;ul&gt;
+&lt;li&gt;a &amp;lt; aa &amp;lt; z &amp;lt; zz &amp;lt; 1 = 01 &amp;lt; 9 &amp;lt; 10&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;The function returns immediately if the loop finds a pair of segments that compare unequal. Otherwise the loop stops (without stripping separators) when one or both inputs reach the end of line, or breaks (after stripping separators) when one or both inputs reach a final dangling segment.&lt;&#x2F;p&gt;
+&lt;p&gt;At this point, one of these is true:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;at least one version has no segment.&lt;&#x2F;li&gt;
+&lt;li&gt;no versions have missing segments, but at least one version has a dangling segment (causing both segments to be stripped, so at least one version &lt;em&gt;now&lt;&#x2F;em&gt; has no segment).&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;The segments are compared as follows:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;none = none&lt;&#x2F;li&gt;
+&lt;li&gt;none &amp;gt; alpha&lt;&#x2F;li&gt;
+&lt;li&gt;none &amp;lt; separator or number&lt;&#x2F;li&gt;
+&lt;li&gt;alpha &amp;lt; none&lt;&#x2F;li&gt;
+&lt;li&gt;separator or number &amp;gt; none&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;The algorithm is complete.&lt;&#x2F;p&gt;
+&lt;p&gt;All dangling segments compare equal to one another, but come after &amp;quot;segment with text&amp;quot; and &amp;quot;no segment&amp;quot; and before &amp;quot;segment with number&amp;quot;.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;1a &amp;lt; 1 &amp;lt; 1.a &amp;lt; 1. = 1.. &amp;lt; 1.0&lt;&#x2F;p&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;
+&lt;p&gt;&#x27;&#x27; &amp;lt; &#x27;.&#x27; = &#x27;..&#x27;&lt;&#x2F;p&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;
+&lt;p&gt;1 &amp;lt; 1. = 1_ = 1..&lt;&#x2F;p&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Unfortunately this algorithm has a cycle, caused by how more leading separators wins a version comparison (even if followed by a losing body) if both segments have bodies, but gets ignored if one or both segments are empty after trimming.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;1.0 &amp;lt; 1..a (more leading separators wins since both segments have bodies)&lt;&#x2F;li&gt;
+&lt;li&gt;1..a &amp;lt; 1. (leading separators ignored since 1. is empty after trimming, &#x27;a&#x27; &amp;lt; &#x27;&#x27;)&lt;&#x2F;li&gt;
+&lt;li&gt;
+&lt;ol&gt;
+&lt;li&gt;&amp;lt; 1.0 (leading separators ignored since 1. is empty after trimming, &#x27;&#x27; &amp;lt; &#x27;1&#x27;)&lt;&#x2F;li&gt;
+&lt;&#x2F;ol&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Note that 1. and 1... are interchangeable, because the dangling separators get stripped out either way.&lt;&#x2F;p&gt;
+&lt;p&gt;The Pacman developers commented, &amp;quot;Fun example :) Like I said, having multiple delimiters in a row doesn&#x27;t make a lot of sense, so that is pretty much undefined behaviour&amp;quot;&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;testing-the-requirements&quot;&gt;Testing the requirements&lt;&#x2F;h2&gt;
+&lt;p&gt;Dangling segments and multiple separators don&#x27;t occur in real-world version numbers and can be ignored. Does this algorithm properly order real-world versions?&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;1.0beta &amp;lt; 1.0&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Yes, &amp;quot;beta&amp;quot; &amp;lt; &amp;quot;&amp;quot;.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;1.0 &amp;lt; 1.0.1&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Yes, &amp;quot;&amp;quot; &amp;lt; &amp;quot;.1&amp;quot;.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;1.0.1 &amp;lt; 1.0.2&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Yes, &amp;quot;.1&amp;quot; &amp;lt; &amp;quot;.2&amp;quot;.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;1.0 &amp;lt; 1.0.alpha&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Yes, &amp;quot;&amp;quot; &amp;lt; &amp;quot;.alpha&amp;quot;&lt;&#x2F;p&gt;
+&lt;h1 id=&quot;what-is-pkgbuild-and-pkgver&quot;&gt;What is PKGBUILD and &lt;code&gt;pkgver&lt;&#x2F;code&gt;?&lt;&#x2F;h1&gt;
+&lt;p&gt;PKGBUILD files are shell scripts defining variables and functions used by &lt;code&gt;makepkg&lt;&#x2F;code&gt; to build a binary package. The &lt;code&gt;pkgver&lt;&#x2F;code&gt; variable serves as the version number of the PKGBUILD and the package produced. All PKGBUILD files contain a &lt;code&gt;pkgver&lt;&#x2F;code&gt; variable, storing the package&#x27;s version at the time the file was written. However, this is insufficient for VCS&#x2F;&lt;code&gt;-git&lt;&#x2F;code&gt; packages tracking the latest commit in a Git repository, where the version of software built by a PKGBUILD can change even when the PKGBUILD does not. To accommodate this, &lt;code&gt;makepkg&lt;&#x2F;code&gt; also supports a &lt;code&gt;pkgver()&lt;&#x2F;code&gt; function, which when run produces the &lt;em&gt;current&lt;&#x2F;em&gt; version of the package.&lt;&#x2F;p&gt;
+&lt;p&gt;If &lt;code&gt;pkgver&lt;&#x2F;code&gt; is a variable only, then an unmodified PKGBUILD and &lt;code&gt;pkgver&lt;&#x2F;code&gt; means the package has not been updated. But if a &lt;code&gt;pkgver()&lt;&#x2F;code&gt; function is present, then an AUR helper trying to determine if an installed package is outdated must re-clone&#x2F;pull the VCS repo listed in &lt;code&gt;source=(...)&lt;&#x2F;code&gt; and call &lt;code&gt;pkgver()&lt;&#x2F;code&gt; again, even if the PKGBUILD and &lt;code&gt;pkgver&lt;&#x2F;code&gt; are unmodified.&lt;&#x2F;p&gt;
+&lt;p&gt;If a &lt;code&gt;pkgver()&lt;&#x2F;code&gt; function is present, then running &lt;code&gt;makepkg&lt;&#x2F;code&gt; to build the PKGBUILD into a binary package also rewrites the PKGBUILD file with a &lt;em&gt;new&lt;&#x2F;em&gt; value for the &lt;code&gt;pkgver&lt;&#x2F;code&gt; variable. A few fixed-version packages like &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;archlinux&#x2F;svntogit-packages&#x2F;blob&#x2F;master&#x2F;qt5-base&#x2F;trunk&#x2F;PKGBUILD&quot;&gt;qt5-base&lt;&#x2F;a&gt; and &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;archlinux&#x2F;svntogit-packages&#x2F;blob&#x2F;master&#x2F;qt5-wayland&#x2F;trunk&#x2F;PKGBUILD&quot;&gt;qt5-wayland&lt;&#x2F;a&gt; use this property by defining a &lt;code&gt;pkgver()&lt;&#x2F;code&gt; function to automatically recompute complex version numbers. Unlike &lt;code&gt;-git&lt;&#x2F;code&gt; packages in the AUR, these PKGBUILDs build a fixed version of the source code, and their &lt;code&gt;pkgver()&lt;&#x2F;code&gt; functions return a fixed value.&lt;&#x2F;p&gt;
+&lt;h1 id=&quot;building-a-pkgver-so-pacman-sorts-git-repositories-correctly&quot;&gt;Building a &lt;code&gt;pkgver()&lt;&#x2F;code&gt; so Pacman sorts Git repositories correctly&lt;&#x2F;h1&gt;
+&lt;p&gt;Git repositories in the wild have a lot of variance; some don&#x27;t have tags, some have tags that sort properly, and some have tags in the wrong order. And some repositories start with no tags, but create tags later on when they make their first release.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;requirements-for-comparing-versions-1&quot;&gt;Requirements for comparing versions&lt;&#x2F;h2&gt;
+&lt;p&gt;What are the requirements for generating version numbers from a Git repository?&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;As a repository without tags creates more commits, the version number should increase.&lt;&#x2F;li&gt;
+&lt;li&gt;When a repository creates its first release&#x2F;tag, the version number should increase.&lt;&#x2F;li&gt;
+&lt;li&gt;As a repository with tags creates more commits, the version number should increase.&lt;&#x2F;li&gt;
+&lt;li&gt;If the most recent tag changes from 1.0 to 1.1, the version number should increase.&lt;&#x2F;li&gt;
+&lt;li&gt;If the most recent tag changes from 1.0 to 1.0.1, the version number should increase.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;How can we achieve these criteria, given how Pacman works?&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;arch-wiki-templates&quot;&gt;Arch Wiki templates&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;wiki.archlinux.org&#x2F;index.php&#x2F;VCS_package_guidelines#The_pkgver()_function&quot;&gt;The Arch wiki&lt;&#x2F;a&gt; provides copy-paste snippets of example pkgver() functions, but fails to explain the underlying concepts (what &lt;code&gt;git describe&lt;&#x2F;code&gt; outputs, what the sed expression does, how the resulting expression is evaluated by &lt;code&gt;vercmp&lt;&#x2F;code&gt; and &lt;code&gt;pacman&lt;&#x2F;code&gt;).&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;untagged-git-repositories&quot;&gt;Untagged Git repositories&lt;&#x2F;h3&gt;
+&lt;p&gt;In a Git repo where the history of &lt;code&gt;master&lt;&#x2F;code&gt; has no tags, the recommended &lt;code&gt;pkgver()&lt;&#x2F;code&gt; counts commits:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;sh&quot; style=&quot;background-color:#fafafa;color:#111111;&quot; class=&quot;language-sh &quot;&gt;&lt;code class=&quot;language-sh&quot; data-lang=&quot;sh&quot;&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;pkgver&lt;&#x2F;span&gt;&lt;span&gt;() {
+&lt;&#x2F;span&gt;&lt;span&gt;  &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;cd &lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt;&amp;quot;$&lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;pkgname&lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt;&amp;quot;
+&lt;&#x2F;span&gt;&lt;span&gt;  &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;printf &lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt;&amp;quot;r%s.%s&amp;quot; &amp;quot;$(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;git&lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt; rev-list --&lt;&#x2F;span&gt;&lt;span&gt;count&lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt; HEAD)&amp;quot; &amp;quot;$(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;git&lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt; rev-parse --&lt;&#x2F;span&gt;&lt;span&gt;short&lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt; HEAD)&amp;quot;
+&lt;&#x2F;span&gt;&lt;span&gt;}
+&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;This produces a string &lt;code&gt;r{number of commits}.{commit hash}&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Any letter would work equally well for the version comparison algorithm, &lt;code&gt;r&lt;&#x2F;code&gt; was chosen because it sounds like &amp;quot;revision&amp;quot;. But what is the purpose of a letter?&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;tagged-git-repositories&quot;&gt;Tagged Git repositories&lt;&#x2F;h3&gt;
+&lt;p&gt;If the repo has tags like 0.2.5 which begin with a number (no leading &amp;quot;v&amp;quot; prefix like v0.2.5), &lt;code&gt;git describe --long --tags&lt;&#x2F;code&gt; can be used as the root source for the version:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;sh&quot; style=&quot;background-color:#fafafa;color:#111111;&quot; class=&quot;language-sh &quot;&gt;&lt;code class=&quot;language-sh&quot; data-lang=&quot;sh&quot;&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;pkgver&lt;&#x2F;span&gt;&lt;span&gt;() {
+&lt;&#x2F;span&gt;&lt;span&gt;  &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;cd &lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt;&amp;quot;$&lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;pkgname&lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt;&amp;quot;
+&lt;&#x2F;span&gt;&lt;span&gt;  &lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;git&lt;&#x2F;span&gt;&lt;span&gt; describe --long --tags | &lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;sed &lt;&#x2F;span&gt;&lt;span style=&quot;color:#50a14f;&quot;&gt;&amp;#39;s&#x2F;\([^-]*-g\)&#x2F;r\1&#x2F;;s&#x2F;-&#x2F;.&#x2F;g&amp;#39;
+&lt;&#x2F;span&gt;&lt;span&gt;}
+&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;code&gt;git describe --long&lt;&#x2F;code&gt; produces a string with format &lt;code&gt;{most recent tag}-{commits since tag}-g{commit hash}&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;sh&quot; style=&quot;background-color:#fafafa;color:#111111;&quot; class=&quot;language-sh &quot;&gt;&lt;code class=&quot;language-sh&quot; data-lang=&quot;sh&quot;&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;git&lt;&#x2F;span&gt;&lt;span&gt; checkout master
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;git&lt;&#x2F;span&gt;&lt;span&gt; describe --long --tags  &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#a0a1a7;&quot;&gt;# v2.4-25-ga240b43
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;git&lt;&#x2F;span&gt;&lt;span&gt; checkout v2.4  &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#a0a1a7;&quot;&gt;# or git checkout HEAD~25
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#e45649;&quot;&gt;git&lt;&#x2F;span&gt;&lt;span&gt; describe --long --tags  &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#a0a1a7;&quot;&gt;# v2.4-0-g51e51f4
+&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The sed expression turns it into &lt;code&gt;{most recent tag}.r{commits since tag}.g{commit hash}&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;testing-the-requirements-1&quot;&gt;Testing the requirements&lt;&#x2F;h2&gt;
+&lt;ul&gt;
+&lt;li&gt;As a repository without tags creates more commits, the version number should increase.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;&amp;quot;r###&amp;quot; &amp;lt; &amp;quot;r###+1&amp;quot;? Trivially so, as the &amp;quot;r&amp;quot; segment is the same, but the &amp;quot;number of commits&amp;quot; segment increases.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;When a repository creates its first release&#x2F;tag, the version number should increase.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;&amp;quot;r###&amp;quot; &amp;lt; &amp;quot;1.0.r###&amp;quot;? Yes. The version of the untagged repository starts with a &amp;quot;r&amp;quot; segment. The version of the tagged repository starts with a numeric segment (taken from the tag), which comes after.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;As a repository with tags creates more commits, the version number should increase.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;&amp;quot;1.0.r###&amp;quot; &amp;lt; &amp;quot;1.0.r###+1&amp;quot;? Yes. &amp;quot;most recent tag&amp;quot; is unchanged, &amp;quot;.r&amp;quot; is unchanged, and &amp;quot;commits since tag&amp;quot; increases.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;If the most recent tag changes from 1.0 to 1.1, the version number should increase.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;&amp;quot;1.0.r###&amp;quot; &amp;lt; &amp;quot;1.1.r###&amp;quot;? Yes. &amp;quot;most recent tag&amp;quot; increases.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;If the most recent tag changes from 1.0 to 1.0.1, the version number should increase.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;&amp;quot;1.0.r###&amp;quot; &amp;lt; &amp;quot;1.0.1.r###&amp;quot;? Yes. &amp;quot;1&amp;quot;=&amp;quot;1&amp;quot;, &amp;quot;.0&amp;quot;=&amp;quot;.0&amp;quot;, and &amp;quot;.r&amp;quot; &amp;lt; &amp;quot;.1&amp;quot;.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;why-not&quot;&gt;Why not &amp;quot;.&amp;quot;?&lt;&#x2F;h3&gt;
+&lt;p&gt;If tag-based versions were &lt;code&gt;{most recent tag}.{commits since tag}...&lt;&#x2F;code&gt;, then if the most recent tag changes from 1.0 to 1.0.1, the version would change from &amp;quot;1.0.###&amp;quot; to &amp;quot;1.0.1.###&amp;quot;, where &amp;quot;.1&amp;quot; sorts &lt;em&gt;before&lt;&#x2F;em&gt; &amp;quot;.###&amp;quot; despite 1.0.1 being a newer program version.&lt;&#x2F;p&gt;
+&lt;p&gt;This was first brought up by @diabonas:archlinux.org:&lt;&#x2F;p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;You need it because otherwise 1.0.500 (where 500 is the revision count) would be newer than 1.0.1.30 (again, 30 is the revision count) - this doesn&#x27;t happen with 1.0.r500, which is older than 1.0.1.r30 because a letter is always older than a digit&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;h3 id=&quot;why-not-r&quot;&gt;Why not &amp;quot;r&amp;quot;?&lt;&#x2F;h3&gt;
+&lt;blockquote&gt;
+&lt;p&gt;It&#x27;s 1.0.1.r30 - the dot is important as 1.0.1r30 would be older than 1.0.1, but 1.0.1.r30 is newer - it&#x27;s a revision after 1.0.1 after all. And yeah, 1.0r31 is a revision after 1.0, but before the next upstream release 1.0.1, whole 1.0.1.r31 is a revision after 1.0.1, so newer than 1.0.r30&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;h2 id=&quot;the-arch-wiki-is-wrong&quot;&gt;The Arch Wiki is wrong&lt;&#x2F;h2&gt;
+&lt;p&gt;The Arch wiki&#x27;s stated requirements for generating version numbers are:&lt;&#x2F;p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;It is recommended to have following version format: &lt;em&gt;RELEASE.rREVISION&lt;&#x2F;em&gt; where &lt;em&gt;REVISION&lt;&#x2F;em&gt; is a monotonically increasing number that uniquely identifies the source tree (VCS revisions do this).&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;p&gt;The Arch wiki is wrong; given the &amp;quot;RELEASE.RELEASE.rREVISION&amp;quot; convention recommended by the wiki, for Pacman to properly identify older and newer packages, REVISION does not need to be globally monotonic, only within a given RELEASE. And the Arch wiki even breaks its own rules: the example &amp;quot;Git with tags&amp;quot; &lt;code&gt;pkgver()&lt;&#x2F;code&gt;&#x27;s REVISION is not monotonic except within a given RELEASE (Git tag).&lt;&#x2F;p&gt;
+&lt;p&gt;Even if the Arch wiki was changed to say that REVISION needs to be monotonic within a given RELEASE, it states that &lt;code&gt;0.1.r456 &amp;gt; r454&lt;&#x2F;code&gt; but &lt;code&gt;0.1.456 &amp;lt; 454&lt;&#x2F;code&gt;, without explaining the algorithm used to compare revisions. This only serves to confuse the reader.&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>ExoTracker Newsletter #2 - Pivoting to SNES, designing an instrument list</title>
+		<published>2021-03-10T00:00:00-08:00</published>
+		<updated>2021-03-10T00:00:00-08:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-2-pivoting-to-snes/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-2-pivoting-to-snes/</id>
+		<content type="html">&lt;p&gt;For those of you who aren&#x27;t already aware, ExoTracker is a tracker-like composing tool, based around subdividing beats instead of integer rows. This allows the user to place notes at arbitrary fractions of a beat (like sheet music), and additionally allows tracker-like delay effects (which can be negative, which is impossible in most trackers). Beat subdivision allows for mixing eighth notes and triplets, and using beats for timing (rather than rows) could make tempo calculation more intuitive than other trackers.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;pivoting-to-a-snes-tracker&quot;&gt;Pivoting to a SNES tracker&lt;&#x2F;h2&gt;
+&lt;p&gt;After spending several months away from ExoTracker, I&#x27;ve decided to switch away from emulating a Famicom with expansions, to a SNES&#x27;s SPC700 sound chip. I chose to do this because the SNES has less pre-existing options for composing (especially if you limit yourself to free options, ruling out chipsynth SFC and somewhat SNES Tracker). Another benefit is that it&#x27;s simpler to write a SNES sound engine; the SNES only has 1 type of channel, so I don&#x27;t need to find a way to modularize&#x2F;abstract the sound driver to reuse instrument code for the Famicom&#x27;s numerous expansion chips, which have different register addresses, sizes, and interpretations (pitch: period vs frequency vs Yamaha, volume: linear vs. log vs. hardware envelopes).&lt;&#x2F;p&gt;
+&lt;p&gt;Issue is, I haven&#x27;t decided how to handle timing... On the NES, the vblank interrupt is the most processor-efficient way to tick the audio engine, and you normally run one tick per vblank. But (to the best of my understanding) the S-SMP (CPU) has 1 fast and 2 slow timers (with configurable dividers), and they don&#x27;t interrupt the S-SMP, so you need to busy-wait and poll them manually. And some SNES games change the timer speed to adjust song tempo (so each quarter note is a fixed number of timer ticks like MIDI). Others have unchanging timer speeds and let an uneven number of timer ticks pass between each subsequent quarter note (like FamiTracker&#x27;s tempo).&lt;&#x2F;p&gt;
+&lt;p&gt;Looking at how pre-existing trackers behave, FamiTracker allows users to configure Speed and Tempo, which interact strangely&lt;sup class=&quot;footnote-reference&quot;&gt;&lt;a href=&quot;#1&quot;&gt;1&lt;&#x2F;a&gt;&lt;&#x2F;sup&gt;. 0CC-FT adds more modes: &amp;quot;fixed&amp;quot; to turn off Tempo so Speed controls &amp;quot;ticks&#x2F;row&amp;quot; directly, and grooves to switch Speed on every row.&lt;&#x2F;p&gt;
+&lt;p&gt;OpenMPT has &lt;a href=&quot;https:&#x2F;&#x2F;wiki.openmpt.org&#x2F;Manual:_Song_Properties#Overview&quot;&gt;3 tempo modes&lt;&#x2F;a&gt; comprising 2 conceptually different types: Classic&#x2F;Alternative let users pick the duration of rows, whereas Modern lets users pick the duration of beats. Both come with customizable &amp;quot;ticks&#x2F;second&amp;quot; (which is fixed in FamiTracker), and Classic&#x2F;Alternative (but not Modern) suffer from tempo rounding errors. Since ExoTracker doesn&#x27;t have rows (but instead arbitrary beat subdivisions), copying Classic&#x2F;Alternative is not an option, and only copying Modern is.&lt;&#x2F;p&gt;
+&lt;p&gt;I&#x27;m going to use a SPC700 emulation core (likely Blargg&#x27;s). I think only the S-SMP can read the SPC700&#x27;s timers... but I probably won&#x27;t write S-SMP code, but instead will reimplement the driver in C++, using native x86 instructions to communicate with the GUI and S-DSP emulator, so I&#x27;ll have to simulate the timers myself. Anyway I need to pick whether to use the fast or slow timer (probably copy existing games), what GUI to provide for customizing the timer rate (either expose the raw register value, or a tempo which gets converted&#x2F;rounded to a divider register),  and what tempo mode to use (fixed-timer&#x2F;FamiTracker tempo, vs variable-timer&#x2F;MIDI&#x2F;OpenMPT Modern) since it&#x27;s impractical to implement multiple tempo modes in the C++ and ASM drivers.&lt;&#x2F;p&gt;
+&lt;div class=&quot;footnote-definition&quot; id=&quot;1&quot;&gt;&lt;sup class=&quot;footnote-definition-label&quot;&gt;1&lt;&#x2F;sup&gt;
+&lt;p&gt;In FamiTracker:&lt;&#x2F;p&gt;
+&lt;&#x2F;div&gt;
+&lt;ul&gt;
+&lt;li&gt;Tempo only matches &amp;quot;beats&#x2F;min&amp;quot; if Speed * &amp;quot;Highlight 1&amp;quot; = 24.&lt;&#x2F;li&gt;
+&lt;li&gt;Speed only matches &amp;quot;ticks&#x2F;row&amp;quot; if Tempo = &amp;quot;ticks&#x2F;second&amp;quot; * 2.5.&lt;&#x2F;li&gt;
+&lt;li&gt;Speed defaults to 6 &amp;quot;ticks&#x2F;row&amp;quot;. Highlight 1 defaults to 4 rows&#x2F;beat. Tempo defaults to 150 &amp;quot;beats&#x2F;min&amp;quot;. Ticks&#x2F;second defaults to 60 (or 50 on PAL) because ticks are usually triggered by vblanks&#x2F;frames.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;designing-an-instrument-list&quot;&gt;Designing an instrument list&lt;&#x2F;h2&gt;
+&lt;p&gt;There is no instrument editor, and I don&#x27;t know when there will be one. In the meantime I&#x27;ve been working on adding an instrument list.&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;instrument-list.png 1.25x&quot; src=&quot;instrument-list.png&quot; alt=&quot;I added an instrument list widget. The instruments form columns, just like FamiTracker&#x27;s instrument list. Unlike FamiTracker, it shows all 128 instrument slots, even though most of them are empty. It&#x27;s confusing to look at.&quot;&gt;
+  &lt;figcaption&gt;I added an instrument list widget. The instruments form columns, just like FamiTracker&#x27;s instrument list. Unlike FamiTracker, it shows all 128 instrument slots, even though most of them are empty. It&#x27;s confusing to look at.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;So looking at this picture, obviously it needs improvement. Aside from showing dozens of empty slots, another difference from FamiTracker is that each column has its own width, instead of matching the width of the widest instrument in any column. I&#x27;m not sure if that&#x27;s a good or bad thing, or if the Qt GUI library allows me to change it.&lt;&#x2F;p&gt;
+&lt;p&gt;One solution is to copy how FamiTracker only shows occupied instrument slots. Implementing will take work, because you need to filter the array of numbered instruments and only expose the slots with instruments, and when a user clicks an item, map from the item&#x27;s position in the widget back to instrument numbers. One approach is to keep a cached vector of items, each one holding an instrument number that&#x27;s guaranteed to point to a non-empty instrument, and regenerate this vector whenever the document is modified.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;missing-functionality-in-famitracker&quot;&gt;Missing functionality in FamiTracker&lt;&#x2F;h3&gt;
+&lt;p&gt;Unfortunately FamiTracker&#x27;s instrument drag-and-drop behavior leaves features to be desired. FamiTracker defines drag-and-drop to swap instruments (and not empty slots). But sometimes I want to move an instrument into an empty slot, which is not possible (unless you fill empty slots with placeholder instruments). And sometimes I want to insert, remove, or move instruments, which shifts all instrument numbers afterwards by 1. (In some cases, this may even include empty slots as well, which may or may not be desirable.) This is not possible in FamiTracker unless you drag each instrument over one by one, which is tedious.&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img src=&quot;famitracker-instrument-groups.png&quot; src=&quot;famitracker-instrument-groups.png&quot; alt=&quot;At 96 DPI, FamiTracker&#x27;s instruments are grouped into 8-instrument columns. Each has the same leading digit, and each leading digit is split into exactly 2 columns.&quot;&gt;
+  &lt;figcaption&gt;At 96 DPI, FamiTracker&#x27;s instruments are grouped into 8-instrument columns. Each has the same leading digit, and each leading digit is split into exactly 2 columns.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;I also like to categorize instruments into percussion, melodic, and expansion chip instruments, then divide them into groups of 8. This is because in FamiTracker, the instrument list is rendered as groups of 8 instruments. However since FamiTracker does not render empty instrument slots, this requires creating empty instruments to fill in any gaps in the numbering scheme.&lt;&#x2F;p&gt;
+&lt;!-- I also use empty instruments in FamiTracker to group instruments. In FamiTracker, there&#x27;s 8 instruments in each column, so i can organize them in groups of 8. However this requires creating empty instruments in between. --&gt;
+&lt;!-- Another benefit of placeholder instruments (or showing empty slots) is for grouping instruments.  --&gt;
+&lt;p&gt;(Sidenote: If the list widget isn&#x27;t exactly 8 instruments tall, this grouping system breaks, and the instruments are no longer arranged in visually neat columns corresponding 0x0 through 0x7 and 0x8 through 0xf.)&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;famitracker-instrument-groups-125.png 1.25x&quot; src=&quot;famitracker-instrument-groups-125.png&quot; alt=&quot;Unfortunately at 120 DPI, FamiTracker&#x27;s instrument list is 9 instruments tall rather than 8 (due to rounding differences), breaking the groups. At 192 DPI, the list is 10 instruments tall!&quot;&gt;
+  &lt;figcaption&gt;Unfortunately at 120 DPI, FamiTracker&#x27;s instrument list is 9 instruments tall rather than 8 (due to rounding differences), breaking the groups. At 192 DPI, the list is 10 instruments tall!&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;h3 id=&quot;solution-showing-placeholders&quot;&gt;Solution: showing placeholders?&lt;&#x2F;h3&gt;
+&lt;p&gt;One possibility is providing a user option to show all instruments, including placeholders, from zero until the last occupied instrument slot. You can create or delete instruments in-place (filling or creating an empty slot), drag-and-drop to swap slots (both empty and full), and even insert, delete, or move instruments while shifting the rest forwards or backwards.&lt;&#x2F;p&gt;
+&lt;p&gt;If you want to create or insert instruments past the largest-numbered slot, you&#x27;ll have to check a box to show all slots, even unoccupied ones. This will look ugly if empty columns are very narrow, but will look less ugly if all columns are the same width.&lt;&#x2F;p&gt;
+&lt;p&gt;Unfortunately this solution doesn&#x27;t have the same properties as the &amp;quot;empty-named instruments&amp;quot; I&#x27;ve been using in FamiTracker, requiring users to adjust. If you&#x27;re using empty-but-shown instrument slots (instead of empty-named instruments as in FamiTracker), then pressing the &amp;quot;New Instrument&amp;quot; button won&#x27;t append an instrument to the end of the list (after all the empty-name instruments), but will instead fill the first empty slot.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;another-approach-openmpt&quot;&gt;Another approach: OpenMPT&lt;&#x2F;h3&gt;
+&lt;p&gt;OpenMPT has a tree view on the left of the window, showing a list of numbered samples, and (in many module formats) a list of numbered instruments. The numbers are integers starting from 1, unlike FamiTracker&#x27;s hex values starting from 00. OpenMPT behaves like a dynamic-size list of samples&#x2F;instruments which may have empty names and no data. Contrast this with my previous idea of a fixed-size list of instruments, where each may be absent.&lt;&#x2F;p&gt;
+&lt;p&gt;I&#x27;ve run some testing in a .mptm file on OpenMPT 1.29.07. It seems simple at first, but gets weirder the further you investigate.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Right-clicking any sample&#x2F;instrument and clicking &amp;quot;Insert Sample&amp;quot; or &amp;quot;Insert Instrument&amp;quot; will insert one &lt;em&gt;after&lt;&#x2F;em&gt; the one you&#x27;ve clicked, increasing the number of each subsequent sample&#x2F;instrument by 1.
+&lt;ul&gt;
+&lt;li&gt;This makes sense under my proposed instrument scheme, and is not possible in FamiTracker.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Inserting a sample&#x2F;instrument at the very end of the list will create a blank sample&#x2F;instrument (with a dimmed icon) at the end of the list. This can be repeated to add multiple blank samples&#x2F;instruments.
+&lt;ul&gt;
+&lt;li&gt;This shows that OpenMPT displays (and probably stores) the sample&#x2F;instrument lists with a variable &amp;quot;length&amp;quot; field. This functions quite differently than my proposed &amp;quot;show trailing placeholders&amp;quot; checkbox, and I suspect OpenMPT&#x27;s UI is better. OpenMPT makes it easier to append instruments, whereas my code makes it easier to insert instruments at large indices without filling the space before it.&lt;&#x2F;li&gt;
+&lt;li&gt;I&#x27;m concerned that copying OpenMPT&#x27;s approach can lead to bugs. If my code stores instruments in a dynamic-length vector, it&#x27;s easy to index out of bounds (which can be avoided if I use custom getter functions that treat out-of-bounds indices as &amp;quot;no instrument present&amp;quot;). If my code stores instruments in a fixed-size array with a cosmetic length field (whether saved in the module or not), I can accidentally set a length shorter than the index of the largest instrument present + 1.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Right-clicking any sample&#x2F;instrument and clicking &amp;quot;Delete Sample&#x2F;Instrument&amp;quot; replaces it with an empty slot (with a dimmed icon), and does not shift future instruments&#x2F;samples back by 1 to fill the hole generated. The exception is deleting the last sample&#x2F;instrument, which will decrease the list&#x27;s length by 1 and not leave behind an empty slot.
+&lt;ul&gt;
+&lt;li&gt;It would be nice to have a way to delete full&#x2F;empty slots and shift everything backwards by 1.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Samples have strange behavior:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Samples with no wave data have dimmed icons. This doesn&#x27;t mean much.&lt;&#x2F;li&gt;
+&lt;li&gt;Opening the Samples tab and clicking the Insert Sample button (not to be confused with the Insert Sample right-click menu item) will &lt;em&gt;sometimes&lt;&#x2F;em&gt; insert one at the end of the list of visible samples... and &lt;em&gt;other times&lt;&#x2F;em&gt; overwrite samples with no name and no sample data (created by &amp;quot;Insert Sample&amp;quot; or &amp;quot;Delete Sample&amp;quot;) (and only insert a new sample if none exist). The resulting sample will be called &lt;code&gt;untitled&lt;&#x2F;code&gt;, and because of the non-empty name, cannot be overwritten or deleted.
+&lt;ul&gt;
+&lt;li&gt;Bizzare.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Deleting any sample will delete all trailing &amp;quot;empty&amp;quot; samples (no name &lt;em&gt;and&lt;&#x2F;em&gt; no waveform). The only exception is if all samples in a module are empty, in which case it leaves one behind (all modules have at least 1 sample, and OpenMPT will never delete the last sample).&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Instruments have a different set of strange behavior:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Instruments which have just been deleted have dimmed icons. The &amp;quot;Insert Instrument&amp;quot; &lt;em&gt;button&lt;&#x2F;em&gt; will insert an instrument into the first dimmed instrument, and append a new one if none exist. Changing any property of a deleted&#x2F;dimmed instrument (name, contents) will undim its icon permanently (until deleted again). The &amp;quot;Insert Instrument&amp;quot; &lt;em&gt;menu item&lt;&#x2F;em&gt; will undim &lt;em&gt;all&lt;&#x2F;em&gt; icons.
+&lt;ul&gt;
+&lt;li&gt;So much for consistency.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Trying to delete an instrument slot does nothing if it&#x27;s dimmed.&lt;&#x2F;li&gt;
+&lt;li&gt;Deleting any instrument does not clear trailing empty instruments. Deleting the last instrument shrinks the list by 1 instead of dimming the last instrument, but if the second-last instrument was dimmed, it turns into the last instrument and remain dimmed. In this scenario, you cannot shrink the list any further; the Delete key does nothing, and the right-click menu does nothing. The only solution is to undim the icons and then delete them.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h3 id=&quot;sidenote-openmpt-bugs&quot;&gt;Sidenote: OpenMPT bugs&lt;&#x2F;h3&gt;
+&lt;p&gt;In the sidebar, click a sample. Click again (opens a rename field with time delay) and rapidly press Delete before the rename is initiated. The rename will pop up after the delete dialog appears. Clicking Yes to delete will delete the instrument, but keep the rename field open.&lt;&#x2F;p&gt;
+&lt;p&gt;I&#x27;ve gotten OpenMPT to omit a number in the sidebar&#x27;s sample&#x2F;instrument numbering scheme (probably samples, forgot), after messing with it. It reappeared when I pressed F5 (which began playback).&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;footnotes&quot;&gt;Footnotes&lt;&#x2F;h2&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>An unsafe tour of Rust&#x27;s Send and Sync</title>
+		<published>2021-01-01T06:54:00-08:00</published>
+		<updated>2021-02-09T00:00:00+00:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/an-unsafe-tour-of-rust-s-send-and-sync/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/an-unsafe-tour-of-rust-s-send-and-sync/</id>
+		<content type="html">&lt;p&gt;Rust&#x27;s concurrency safety is based around the &lt;code&gt;Send&lt;&#x2F;code&gt; and &lt;code&gt;Sync&lt;&#x2F;code&gt; traits. For people writing safe code, you don&#x27;t really need to understand these traits on a deep level, only enough to satisfy the compiler when it spits errors at you (or switch from &lt;code&gt;std&lt;&#x2F;code&gt; threads to Crossbeam scoped threads to make errors go away).&lt;span id=&quot;continue-reading&quot;&gt;&lt;&#x2F;span&gt; However if you&#x27;re writing unsafe concurrent code, such as having a &lt;code&gt;&amp;amp;UnsafeCell&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; hand out &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; and &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt;, you need to understand &lt;code&gt;Send&lt;&#x2F;code&gt; and &lt;code&gt;Sync&lt;&#x2F;code&gt; at a more fundamental level, to pick the appropriate trait bounds when writing &lt;code&gt;unsafe impl Send&#x2F;Sync&lt;&#x2F;code&gt; statements, or add the appropriate &lt;code&gt;PhantomData&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; to your types.&lt;&#x2F;p&gt;
+&lt;p&gt;In this article, I will explore the precise behavior of &lt;code&gt;Send&lt;&#x2F;code&gt; and &lt;code&gt;Sync&lt;&#x2F;code&gt;, and explain &lt;em&gt;why&lt;&#x2F;em&gt; the standard library&#x27;s trait bounds are the way they are.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;prior-art&quot;&gt;Prior art&lt;&#x2F;h2&gt;
+&lt;blockquote&gt;
+&lt;p&gt;You can think of Send as &amp;quot;Exclusive access is thread-safe,&amp;quot; and Sync as &amp;quot;Shared access is thread-safe.&amp;quot;&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;www.reddit.com&#x2F;r&#x2F;rust&#x2F;comments&#x2F;9elom2&#x2F;why_does_implt_send_for_mut_t_require_t_send&#x2F;&quot;&gt;[Source]&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;p&gt;I recommended first reading &lt;a href=&quot;https:&#x2F;&#x2F;limpet.net&#x2F;mbrubeck&#x2F;2019&#x2F;02&#x2F;07&#x2F;rust-a-unique-perspective.html&quot;&gt;&amp;quot;Rust: A unique perspective&amp;quot;&lt;&#x2F;a&gt;. This article gives a conceptual overview of the mechanics (unique and shared references) I will analyze in more depth.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;defining-sync-and-send&quot;&gt;Defining Sync and Send&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;code&gt;T: Send&lt;&#x2F;code&gt; means &lt;code&gt;T&lt;&#x2F;code&gt; and &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt; (which allow dropping &lt;code&gt;T&lt;&#x2F;code&gt;) can be passed between threads. &lt;code&gt;T: Sync&lt;&#x2F;code&gt; means &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; (which allows shared&#x2F;aliased access to &lt;code&gt;T&lt;&#x2F;code&gt;) can be passed between threads. Either or both may be true for any given type. &lt;code&gt;T: Sync&lt;&#x2F;code&gt; ≡ &lt;code&gt;&amp;amp;T: Send&lt;&#x2F;code&gt; (by definition).&lt;&#x2F;p&gt;
+&lt;p&gt;One way that &lt;code&gt;T: !Sync&lt;&#x2F;code&gt; can occur is &lt;strong&gt;if a type has non-atomic interior mutability&lt;&#x2F;strong&gt;. This means that every &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; (there can be more than one) can mutate &lt;code&gt;T&lt;&#x2F;code&gt; at the same time non-atomically, causing data races if a &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; is sent to another thread. &lt;code&gt;T: !Sync&lt;&#x2F;code&gt; includes &lt;code&gt;Cell&amp;lt;V&amp;gt;&lt;&#x2F;code&gt; and &lt;code&gt;RefCell&amp;lt;V&amp;gt;&lt;&#x2F;code&gt;, as well as &lt;code&gt;Rc&amp;lt;V&amp;gt;&lt;&#x2F;code&gt; (which acts like &lt;code&gt;&amp;amp;(Cell&amp;lt;RefCount&amp;gt;, V)&lt;&#x2F;code&gt;).&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;T: !Send&lt;&#x2F;code&gt; &lt;strong&gt;if a type is bound to the current thread&lt;&#x2F;strong&gt;. Examples:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;MutexGuard&lt;&#x2F;code&gt;, where the &amp;quot;unlock&amp;quot; syscall must occur on the same thread as &amp;quot;lock&amp;quot;.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;&amp;amp;V&lt;&#x2F;code&gt; where &lt;code&gt;V&lt;&#x2F;code&gt; can be modified non-atomically (only safe from a single thread) through multiple &lt;code&gt;&amp;amp;V&lt;&#x2F;code&gt; (explained above).&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;primitives&quot;&gt;Primitives&lt;&#x2F;h2&gt;
+&lt;p&gt;Most primitive types (like &lt;code&gt;i32&lt;&#x2F;code&gt;) are &lt;code&gt;Send+Sync&lt;&#x2F;code&gt;. They can be read through shared references (&lt;code&gt;&amp;amp;&lt;&#x2F;code&gt;) by multiple threads at once (&lt;code&gt;Sync&lt;&#x2F;code&gt;), and modified through unique references (&lt;code&gt;&amp;amp;mut&lt;&#x2F;code&gt;) by any one thread at a time (&lt;code&gt;Send&lt;&#x2F;code&gt;).&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;owning-references&quot;&gt;Owning references&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;code&gt;Box&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; and &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt; give the same access as having a &lt;code&gt;T&lt;&#x2F;code&gt; directly, so it shares the same Sync&#x2F;Send status as &lt;code&gt;T&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;(Sidenote) Technically, &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt; allows swapping the &lt;code&gt;T&lt;&#x2F;code&gt; (which cannot panic), but prohibits moving the &lt;code&gt;T&lt;&#x2F;code&gt;. This is because moving invalidates the &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt;, and the &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt;s and &lt;code&gt;T&lt;&#x2F;code&gt; it&#x27;s constructed from.&lt;&#x2F;p&gt;
+&lt;p&gt;For a demonstration of &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt;, see &lt;a href=&quot;https:&#x2F;&#x2F;nyanpasu64.gitlab.io&#x2F;blog&#x2F;an-unsafe-tour-of-rust-s-send-and-sync&#x2F;#example-passing-mut-t-send-between-threads&quot;&gt;&amp;quot;Example: Passing &lt;code&gt;&amp;amp;mut (T: Send)&lt;&#x2F;code&gt; between threads&amp;quot;&lt;&#x2F;a&gt; section in this page.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;where-these-semantics-are-defined&quot;&gt;Where these semantics are defined&lt;&#x2F;h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;primitive.reference.html#impl-Send-1&quot;&gt;&lt;code&gt;impl Send for &amp;amp;mut T where T: Send&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;impl Sync for &amp;amp;mut T where T: Sync&lt;&#x2F;code&gt; is not on the page...&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;boxed&#x2F;struct.Box.html#impl-Send&quot;&gt;&lt;code&gt;impl Send for Box&amp;lt;T&amp;gt; where T: Send&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;boxed&#x2F;struct.Box.html#impl-Sync&quot;&gt;&lt;code&gt;impl Sync for Box&amp;lt;T&amp;gt; where T: Sync&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;shared-references&quot;&gt;Shared references&lt;&#x2F;h2&gt;
+&lt;p&gt;Unlike owning references, many &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; can be created from the same &lt;code&gt;T&lt;&#x2F;code&gt;. And an unlimited number of &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; and &lt;code&gt;Rc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; and &lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; copies&#x2F;clones can point to the same &lt;code&gt;T&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;By definition, you can &lt;code&gt;Send&lt;&#x2F;code&gt; &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; instances to other threads iff &lt;code&gt;T&lt;&#x2F;code&gt; is &lt;code&gt;Sync&lt;&#x2F;code&gt;. For example, &lt;code&gt;&amp;amp;i32&lt;&#x2F;code&gt; is &lt;code&gt;Send&lt;&#x2F;code&gt; because &lt;code&gt;i32&lt;&#x2F;code&gt; is &lt;code&gt;Sync&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Less obvious is that &lt;code&gt;&amp;amp;T: Sync&lt;&#x2F;code&gt; requires that &lt;code&gt;T: Sync&lt;&#x2F;code&gt;. Why is this the case?&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Why must &lt;code&gt;T&lt;&#x2F;code&gt; be &lt;code&gt;Sync&lt;&#x2F;code&gt;? We want &lt;code&gt;&amp;amp;T: Sync&lt;&#x2F;code&gt;. This means &lt;code&gt;&amp;amp;&amp;amp;T&lt;&#x2F;code&gt; (which is clonable&#x2F;copyable) is &lt;code&gt;Send&lt;&#x2F;code&gt;, allowing multiple threads to concurrently obtain &lt;code&gt;&amp;amp;&amp;amp;T&lt;&#x2F;code&gt; and &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt;, which is only legal if &lt;code&gt;T: Sync&lt;&#x2F;code&gt;.&lt;&#x2F;li&gt;
+&lt;li&gt;Why is &lt;code&gt;&amp;amp;&amp;amp;T: Send&lt;&#x2F;code&gt; legal? Because &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; lacks interior mutability (a &lt;code&gt;&amp;amp;&amp;amp;T&lt;&#x2F;code&gt; can&#x27;t modify the &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; to point to a different &lt;code&gt;T&lt;&#x2F;code&gt;).&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h3 id=&quot;sources&quot;&gt;Sources&lt;&#x2F;h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;primitive.reference.html#impl-Send&quot;&gt;&lt;code&gt;impl Send for &amp;amp;T where T: Sync&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;impl Sync for &amp;amp;T where T: Sync&lt;&#x2F;code&gt; is not on the page...
+&lt;ul&gt;
+&lt;li&gt;For a demonstration, see the &lt;a href=&quot;https:&#x2F;&#x2F;nyanpasu64.gitlab.io&#x2F;blog&#x2F;an-unsafe-tour-of-rust-s-send-and-sync&#x2F;#example-t-send-or-sync-both-depend-on-t-sync&quot;&gt;&amp;quot;Example: &lt;code&gt;&amp;amp;T: Send or Sync&lt;&#x2F;code&gt; both depend on &lt;code&gt;T: Sync&lt;&#x2F;code&gt;&amp;quot;&lt;&#x2F;a&gt; section in this page.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;interior-mutability&quot;&gt;Interior mutability&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;code&gt;Cell&amp;lt;i32&amp;gt;&lt;&#x2F;code&gt; (and &lt;code&gt;RefCell&amp;lt;i32&amp;gt;&lt;&#x2F;code&gt;) is &lt;code&gt;!Sync&lt;&#x2F;code&gt; because it has single-threaded &lt;strong&gt;interior mutability&lt;&#x2F;strong&gt;, which translates to multithreaded &lt;strong&gt;data races&lt;&#x2F;strong&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;UnsafeCell&amp;lt;i32&amp;gt;&lt;&#x2F;code&gt; is &lt;code&gt;!Sync&lt;&#x2F;code&gt; to prevent misuse, since only some usages are &lt;code&gt;Sync&lt;&#x2F;code&gt; and &lt;code&gt;impl !Sync&lt;&#x2F;code&gt; is unstable. As a result, you need to &lt;code&gt;unsafe impl Sync&lt;&#x2F;code&gt; (which shows up in grep) if you want concurrent access.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;smart-pointers-rc-t&quot;&gt;Smart pointers: &lt;code&gt;Rc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;code&gt;Rc&amp;lt;i32&amp;gt;&lt;&#x2F;code&gt; acts like &lt;code&gt;&amp;amp;(Cell&amp;lt;RefCount&amp;gt;, i32)&lt;&#x2F;code&gt;. It is &lt;code&gt;!Sync&lt;&#x2F;code&gt; because &lt;code&gt;Cell&amp;lt;RefCount&amp;gt;&lt;&#x2F;code&gt; has &lt;strong&gt;interior mutability&lt;&#x2F;strong&gt; and &lt;strong&gt;data races&lt;&#x2F;strong&gt; on &lt;code&gt;RefCount&lt;&#x2F;code&gt;, and &lt;code&gt;!Send&lt;&#x2F;code&gt; because &lt;code&gt;Rc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; is clonable, acts like a&lt;code&gt;&amp;amp;Cell&amp;lt;RefCount&amp;gt;&lt;&#x2F;code&gt;, and &lt;code&gt;Cell&amp;lt;RefCount&amp;gt;&lt;&#x2F;code&gt; is &lt;code&gt;!Sync&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;(Technically &lt;code&gt;Rc&amp;lt;i32&amp;gt;&lt;&#x2F;code&gt; also acts like &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt; in its ability to drop &lt;code&gt;T&lt;&#x2F;code&gt;, but it doesn&#x27;t matter because it&#x27;s always &lt;code&gt;!Send&lt;&#x2F;code&gt; and &lt;code&gt;!Sync&lt;&#x2F;code&gt;.)&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;sources-1&quot;&gt;Sources&lt;&#x2F;h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;rc&#x2F;struct.Rc.html#impl-Send&quot;&gt;&lt;code&gt;impl&amp;lt;T&amp;gt; !Send for Rc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;rc&#x2F;struct.Rc.html#impl-Sync&quot;&gt;&lt;code&gt;impl&amp;lt;T&amp;gt; !Sync for Rc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;smart-pointers-arc-t-atomic-refcounting&quot;&gt;Smart pointers: &lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; (atomic refcounting)&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; is a doozy. It acts like &lt;code&gt;&amp;amp;(Atomic&amp;lt;RefCount&amp;gt;, T)&lt;&#x2F;code&gt; in its ability to alias &lt;code&gt;T&lt;&#x2F;code&gt;, and &lt;code&gt;T&lt;&#x2F;code&gt;&#x2F;&lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt; in its ability to drop or &lt;code&gt;get_mut&lt;&#x2F;code&gt; or &lt;code&gt;try_unwrap&lt;&#x2F;code&gt; the &lt;code&gt;T&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Because &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; can alias, &lt;code&gt;Arc&amp;lt;T&amp;gt;: Send+Sync&lt;&#x2F;code&gt; requires &lt;code&gt;T: Sync&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Additionally, &lt;code&gt;Arc&amp;lt;T&amp;gt;: Send&lt;&#x2F;code&gt; requires &lt;code&gt;T: Send&lt;&#x2F;code&gt; (because you can move &lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; across threads, and &lt;code&gt;T&lt;&#x2F;code&gt; with it).&lt;&#x2F;p&gt;
+&lt;p&gt;And &lt;code&gt;Arc&amp;lt;T&amp;gt;: Sync&lt;&#x2F;code&gt; requires &lt;code&gt;T: Send&lt;&#x2F;code&gt;, because if &lt;code&gt;T: !Send&lt;&#x2F;code&gt; but &lt;code&gt;Arc&amp;lt;T&amp;gt;: Sync&lt;&#x2F;code&gt;, you could clone the Arc (via &lt;code&gt;&amp;amp;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;) from another thread, and drop (or &lt;code&gt;get_mut&lt;&#x2F;code&gt; or &lt;code&gt;try_unwrap&lt;&#x2F;code&gt;) the clone last, violating &lt;code&gt;T: !Send&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;(&lt;code&gt;Atomic&amp;lt;RefCount&amp;gt;&lt;&#x2F;code&gt; is &lt;code&gt;Send+Sync&lt;&#x2F;code&gt; and does not contribute to &lt;code&gt;Arc&lt;&#x2F;code&gt;&#x27;s thread safety.)&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;sources-2&quot;&gt;Sources&lt;&#x2F;h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;sync&#x2F;struct.Arc.html#impl-Send&quot;&gt;&lt;code&gt;impl&amp;lt;T&amp;gt; Send for Arc&amp;lt;T&amp;gt; where T: Send + Sync&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;sync&#x2F;struct.Arc.html#impl-Sync&quot;&gt;&lt;code&gt;impl&amp;lt;T&amp;gt; Sync for Arc&amp;lt;T&amp;gt; where T: Send + Sync&lt;&#x2F;code&gt;&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;This was also discussed in a &lt;a href=&quot;https:&#x2F;&#x2F;stackoverflow.com&#x2F;questions&#x2F;41909811&#x2F;why-does-arct-require-t-to-be-both-send-and-sync-in-order-to-be-send&quot;&gt;Stack Overflow question&lt;&#x2F;a&gt;.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;mutexes&quot;&gt;Mutexes&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;code&gt;Mutex&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; is &lt;code&gt;Sync&lt;&#x2F;code&gt; even if &lt;code&gt;T&lt;&#x2F;code&gt; isn&#x27;t, because if multiple threads obtain &lt;code&gt;&amp;amp;Mutex&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;, they can&#x27;t all obtain &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;Mutex&amp;lt;T&amp;gt;: Sync&lt;&#x2F;code&gt; requires &lt;code&gt;T: Send&lt;&#x2F;code&gt;. We want &lt;code&gt;&amp;amp;Mutex&lt;&#x2F;code&gt; to be &lt;code&gt;Send&lt;&#x2F;code&gt;, meaning multiple threads can lock the mutex and obtain a &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt; (which lets you swap &lt;code&gt;T&lt;&#x2F;code&gt; and control which thread calls &lt;code&gt;Drop&lt;&#x2F;code&gt;). To hand-wave, exclusive access to &lt;code&gt;T&lt;&#x2F;code&gt; gets passed between threads, requiring that &lt;code&gt;T: Send&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;Mutex&amp;lt;T&amp;gt;: Send&lt;&#x2F;code&gt; requires &lt;code&gt;T: Send&lt;&#x2F;code&gt; because &lt;code&gt;Mutex&lt;&#x2F;code&gt; is a value type.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;MutexGuard&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; is &lt;code&gt;!Send&lt;&#x2F;code&gt; because it&#x27;s &lt;strong&gt;bound to the constructing thread&lt;&#x2F;strong&gt; (on some OSes including Windows, you can&#x27;t send or exchange &amp;quot;responsibility for freeing a mutex&amp;quot; to another thread). Otherwise it acts like a &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt;, which is &lt;code&gt;Sync&lt;&#x2F;code&gt; if T is &lt;code&gt;Sync&lt;&#x2F;code&gt;. Additionally you can extract a &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt; (which is &lt;code&gt;Send&lt;&#x2F;code&gt;) using &lt;code&gt;&amp;amp;mut *guard&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;sources-3&quot;&gt;Sources&lt;&#x2F;h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;sync&#x2F;struct.Mutex.html#impl-Send&quot;&gt;&lt;code&gt;Mutex&lt;&#x2F;code&gt; traits&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;a href=&quot;https:&#x2F;&#x2F;doc.rust-lang.org&#x2F;std&#x2F;sync&#x2F;struct.MutexGuard.html#impl-Send&quot;&gt;&lt;code&gt;MutexGuard&lt;&#x2F;code&gt; traits&lt;&#x2F;a&gt;&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h3 id=&quot;contrived-corner-cases&quot;&gt;Contrived corner cases&lt;&#x2F;h3&gt;
+&lt;p&gt;&lt;code&gt;Mutex&amp;lt;MutexGuard&amp;lt;i32&amp;gt;&amp;gt;&lt;&#x2F;code&gt; is &lt;code&gt;!Sync&lt;&#x2F;code&gt; because &lt;code&gt;MutexGuard&amp;lt;i32&amp;gt;&lt;&#x2F;code&gt; is &lt;code&gt;!Send&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;thoughts-on-trait-bounds-and-flexibility-for-users&quot;&gt;Thoughts on trait bounds and flexibility for users&lt;&#x2F;h2&gt;
+&lt;p&gt;Why does &lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; not have a &lt;code&gt;where T: Send + Sync&lt;&#x2F;code&gt; trait bound, but instead allows you to construct &lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; for any &lt;code&gt;T&lt;&#x2F;code&gt; (but just not send&#x2F;share it across threads)?&lt;&#x2F;p&gt;
+&lt;p&gt;I&#x27;ve heard that you should avoid putting trait bounds in types, but (if I remember correctly) instead in method implementations, or (in the case of &lt;code&gt;Arc&lt;&#x2F;code&gt;) in conditional &lt;code&gt;Send&lt;&#x2F;code&gt;&#x2F;&lt;code&gt;Sync&lt;&#x2F;code&gt; implementations. One person said:&lt;&#x2F;p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;The reason the restrictions are usually on the implementations rather than on the type in general is that you don&#x27;t usually know every possible implementation
+If you later realize you can add other functionality, you can just add additional impl blocks with different restrictions, whereas if they were on the type you would potentially have to worry about unifying the restrictions (which can be really awkward) or removing them altogether&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;p&gt;When asking about this topic, I was pointed to the &lt;a href=&quot;https:&#x2F;&#x2F;rust-lang.github.io&#x2F;api-guidelines&#x2F;about.html&quot;&gt;Rust API guidelines&lt;&#x2F;a&gt;, but I couldn&#x27;t find any discussion of this issue.&lt;&#x2F;p&gt;
+&lt;hr &#x2F;&gt;
+&lt;p&gt;I personally encountered this topic when I used an &lt;code&gt;Arc&lt;&#x2F;code&gt; internally for &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;nyanpasu64&#x2F;spectro2&#x2F;blob&#x2F;master&#x2F;flip-cell&#x2F;src&#x2F;lib.rs&quot;&gt;the &lt;code&gt;flip-cell&lt;&#x2F;code&gt; crate&lt;&#x2F;a&gt; (which turns out to be equivalent to &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;Ralith&#x2F;oddio&#x2F;blob&#x2F;main&#x2F;src&#x2F;swap.rs&quot;&gt;Oddio&#x27;s &lt;code&gt;Swap&lt;&#x2F;code&gt; type&lt;&#x2F;a&gt; and the &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;HadrienG2&#x2F;triple-buffer&quot;&gt;&lt;code&gt;triple-buffer&lt;&#x2F;code&gt; crate&lt;&#x2F;a&gt;).&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;Arc&amp;lt;T&amp;gt;: Sync&lt;&#x2F;code&gt; is only safe if &lt;code&gt;T: Send&lt;&#x2F;code&gt;, not just &lt;code&gt;T: Sync&lt;&#x2F;code&gt;; this is because another thread can look at an &lt;code&gt;&amp;amp;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;, clone it, and obtain an &lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; sharing ownership over the same object. But if we create a type &lt;code&gt;FlipReader&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; (&lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;nyanpasu64&#x2F;spectro2&#x2F;blob&#x2F;05561a21d85fc5fc0e8e92140edf01d6b64401bc&#x2F;flip-cell&#x2F;src&#x2F;lib.rs#L188-L201&quot;&gt;source&lt;&#x2F;a&gt;) which contains an &lt;code&gt;Arc&amp;lt;Wrapper&amp;lt;T&amp;gt;&amp;gt;&lt;&#x2F;code&gt; but prohibits cloning it, then making &lt;code&gt;FlipReader&amp;lt;T&amp;gt;: Sync&lt;&#x2F;code&gt; does not allow another thread to take shared ownership of &lt;code&gt;Wrapper&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;, so the &lt;code&gt;Wrapper&amp;lt;T&amp;gt;: Send&lt;&#x2F;code&gt; trait bound is unnecessary.&lt;&#x2F;p&gt;
+&lt;p&gt;Had the struct &lt;code&gt;Arc&amp;lt;T&amp;gt;&lt;&#x2F;code&gt; required &lt;code&gt;T: Send + Sync&lt;&#x2F;code&gt; to even be constructed, &lt;code&gt;Arc&lt;&#x2F;code&gt; would be crippled as a building block for unsafe code.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;example-passing-mut-t-send-between-threads&quot;&gt;Example: Passing &lt;code&gt;&amp;amp;mut (T: Send)&lt;&#x2F;code&gt; between threads&lt;&#x2F;h2&gt;
+&lt;p&gt;Cell is &lt;code&gt;Send&lt;&#x2F;code&gt; but not &lt;code&gt;Sync&lt;&#x2F;code&gt;. Both &lt;code&gt;Cell&lt;&#x2F;code&gt; and &lt;code&gt;&amp;amp;mut Cell&lt;&#x2F;code&gt; can be passed between threads. The following code builds as-is, but not if &lt;code&gt;&amp;amp;mut&lt;&#x2F;code&gt; is changed to &lt;code&gt;&amp;amp;&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; style=&quot;background-color:#fafafa;color:#111111;&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;use &lt;&#x2F;span&gt;&lt;span&gt;std::thread;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;use &lt;&#x2F;span&gt;&lt;span&gt;std::cell::Cell;
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;main&lt;&#x2F;span&gt;&lt;span&gt;() {
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#a0a1a7;&quot;&gt;&#x2F;&#x2F; Send + !Sync
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span&gt; cell_ref: &amp;amp;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;mut &lt;&#x2F;span&gt;&lt;span&gt;Cell&amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;i32&lt;&#x2F;span&gt;&lt;span&gt;&amp;gt; = &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;Box&lt;&#x2F;span&gt;&lt;span&gt;::leak(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;Box&lt;&#x2F;span&gt;&lt;span&gt;::new(Cell::new(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#986801;&quot;&gt;0&lt;&#x2F;span&gt;&lt;span&gt;)));
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span&gt;    thread::spawn(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;move &lt;&#x2F;span&gt;&lt;span&gt;|| {
+&lt;&#x2F;span&gt;&lt;span&gt;        cell_ref.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;replace&lt;&#x2F;span&gt;&lt;span&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#986801;&quot;&gt;1&lt;&#x2F;span&gt;&lt;span&gt;);
+&lt;&#x2F;span&gt;&lt;span&gt;    });
+&lt;&#x2F;span&gt;&lt;span&gt;}
+&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;h2 id=&quot;example-t-send-or-sync-both-depend-on-t-sync&quot;&gt;Example: &lt;code&gt;&amp;amp;T: Send or Sync&lt;&#x2F;code&gt; both depend on &lt;code&gt;T: Sync&lt;&#x2F;code&gt;&lt;&#x2F;h2&gt;
+&lt;p&gt;If &lt;code&gt;T: !Sync&lt;&#x2F;code&gt; (for example &lt;code&gt;Cell&lt;&#x2F;code&gt;), then &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; is neither &lt;code&gt;Send&lt;&#x2F;code&gt; nor &lt;code&gt;Sync&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; style=&quot;background-color:#fafafa;color:#111111;&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;use &lt;&#x2F;span&gt;&lt;span&gt;std::cell::Cell;
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;ensure_sync&lt;&#x2F;span&gt;&lt;span&gt;&amp;lt;T: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;Sync&lt;&#x2F;span&gt;&lt;span&gt;&amp;gt;(_: T) {}
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;ensure_send&lt;&#x2F;span&gt;&lt;span&gt;&amp;lt;T: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;Send&lt;&#x2F;span&gt;&lt;span&gt;&amp;gt;(_: T) {}
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;main&lt;&#x2F;span&gt;&lt;span&gt;() {
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span&gt; foo = Cell::new(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#986801;&quot;&gt;1&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;i32&lt;&#x2F;span&gt;&lt;span&gt;);
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;ensure_sync&lt;&#x2F;span&gt;&lt;span&gt;(&amp;amp;foo);
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;ensure_send&lt;&#x2F;span&gt;&lt;span&gt;(&amp;amp;foo);
+&lt;&#x2F;span&gt;&lt;span&gt;}
+&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Trying to compile this code returns the errors:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#fafafa;color:#111111;&quot;&gt;&lt;code&gt;&lt;span&gt;Standard Error
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span&gt;   Compiling playground v0.0.1 (&#x2F;playground)
+&lt;&#x2F;span&gt;&lt;span&gt;error[E0277]: `Cell&amp;lt;i32&amp;gt;` cannot be shared between threads safely
+&lt;&#x2F;span&gt;&lt;span&gt; --&amp;gt; src&#x2F;main.rs:8:17
+&lt;&#x2F;span&gt;&lt;span&gt;  |
+&lt;&#x2F;span&gt;&lt;span&gt;3 | fn ensure_sync&amp;lt;T: Sync&amp;gt;(_: T) {}
+&lt;&#x2F;span&gt;&lt;span&gt;  |                   ---- required by this bound in `ensure_sync`
+&lt;&#x2F;span&gt;&lt;span&gt;...
+&lt;&#x2F;span&gt;&lt;span&gt;8 |     ensure_sync(&amp;amp;foo);
+&lt;&#x2F;span&gt;&lt;span&gt;  |                 ^^^^ `Cell&amp;lt;i32&amp;gt;` cannot be shared between threads safely
+&lt;&#x2F;span&gt;&lt;span&gt;  |
+&lt;&#x2F;span&gt;&lt;span&gt;  = help: within `&amp;amp;Cell&amp;lt;i32&amp;gt;`, the trait `Sync` is not implemented for `Cell&amp;lt;i32&amp;gt;`
+&lt;&#x2F;span&gt;&lt;span&gt;  = note: required because it appears within the type `&amp;amp;Cell&amp;lt;i32&amp;gt;`
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span&gt;error[E0277]: `Cell&amp;lt;i32&amp;gt;` cannot be shared between threads safely
+&lt;&#x2F;span&gt;&lt;span&gt; --&amp;gt; src&#x2F;main.rs:9:17
+&lt;&#x2F;span&gt;&lt;span&gt;  |
+&lt;&#x2F;span&gt;&lt;span&gt;4 | fn ensure_send&amp;lt;T: Send&amp;gt;(_: T) {}
+&lt;&#x2F;span&gt;&lt;span&gt;  |                   ---- required by this bound in `ensure_send`
+&lt;&#x2F;span&gt;&lt;span&gt;...
+&lt;&#x2F;span&gt;&lt;span&gt;9 |     ensure_send(&amp;amp;foo);
+&lt;&#x2F;span&gt;&lt;span&gt;  |                 ^^^^ `Cell&amp;lt;i32&amp;gt;` cannot be shared between threads safely
+&lt;&#x2F;span&gt;&lt;span&gt;  |
+&lt;&#x2F;span&gt;&lt;span&gt;  = help: the trait `Sync` is not implemented for `Cell&amp;lt;i32&amp;gt;`
+&lt;&#x2F;span&gt;&lt;span&gt;  = note: required because of the requirements on the impl of `Send` for `&amp;amp;Cell&amp;lt;i32&amp;gt;`
+&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;If &lt;code&gt;T: !Send + Sync&lt;&#x2F;code&gt; (for example &lt;code&gt;MutexGuard&lt;&#x2F;code&gt;), then &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt; is still &lt;code&gt;Send + Sync&lt;&#x2F;code&gt;. (This makes sense, because &lt;code&gt;T: !Send&lt;&#x2F;code&gt; only constrains the behavior of a &lt;code&gt;&amp;amp;mut T&lt;&#x2F;code&gt;, and should not affect the properties of a &lt;code&gt;&amp;amp;T&lt;&#x2F;code&gt;.)&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; style=&quot;background-color:#fafafa;color:#111111;&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;use &lt;&#x2F;span&gt;&lt;span&gt;std::marker::PhantomData;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;use &lt;&#x2F;span&gt;&lt;span&gt;std::sync::MutexGuard;
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;ensure_sync&lt;&#x2F;span&gt;&lt;span&gt;&amp;lt;T: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;Sync&lt;&#x2F;span&gt;&lt;span&gt;&amp;gt;(_: T) {}
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;ensure_send&lt;&#x2F;span&gt;&lt;span&gt;&amp;lt;T: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;Send&lt;&#x2F;span&gt;&lt;span&gt;&amp;gt;(_: T) {}
+&lt;&#x2F;span&gt;&lt;span&gt;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#4078f2;&quot;&gt;main&lt;&#x2F;span&gt;&lt;span&gt;() {
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span&gt; foo = PhantomData::&amp;lt;MutexGuard&amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#a626a4;&quot;&gt;i32&lt;&#x2F;span&gt;&lt;span&gt;&amp;gt;&amp;gt; {};
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;ensure_sync&lt;&#x2F;span&gt;&lt;span&gt;(&amp;amp;foo);
+&lt;&#x2F;span&gt;&lt;span&gt;    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#0184bc;&quot;&gt;ensure_send&lt;&#x2F;span&gt;&lt;span&gt;(&amp;amp;foo);
+&lt;&#x2F;span&gt;&lt;span&gt;}
+&lt;&#x2F;span&gt;&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;&lt;em&gt;This blog post was edited on 2021-02-09 to fix minor errors and clarify &lt;code&gt;Rc&amp;lt;V&amp;gt;&lt;&#x2F;code&gt;.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>ExoTracker Issues - Abandoning the grid</title>
+		<published>2020-10-10T19:16:00-07:00</published>
+		<updated>2020-10-10T19:16:00-07:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/exotracker-issues-abandoning-the-grid/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/exotracker-issues-abandoning-the-grid/</id>
+		<content type="html">&lt;p&gt;Trackers have decades of design, with interlocking features and design decisions, many based on the assumption that every event is quantized on a grid:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;You don&#x27;t need lines above events, since it&#x27;s obvious which row the event is in.
+&lt;ul&gt;
+&lt;li&gt;In regular trackers, events are treated as taking up height. Most events are triggered when the cursor enters them, but pattern-jump effects are triggered when the cursor exits them.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Empty grid cells have dashes in them, to indicate an empty slot belonging to a subcolumn (note&#x2F;instrument&#x2F;volume&#x2F;effect...) and row. (I refer to channels as columns, for historical reasons and because Renoise uses the same terminology.)&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;ExoTracker&#x27;s central feature is that events&#x2F;notes no longer have to be quantized to a grid, but are stored as rational numbers (fractions) in terms of &amp;quot;beats&amp;quot;. Events are mapped onto rows using a zoom level (rows per beat), and changing the zoom level causes notes to fall onto or off gridlines.&lt;&#x2F;p&gt;
+&lt;p&gt;(tl;dr: Skip forwards to &lt;a href=&quot;https:&#x2F;&#x2F;nyanpasu64.gitlab.io&#x2F;blog&#x2F;exotracker-issues-abandoning-the-grid&#x2F;#per-digit-cursors&quot;&gt;&amp;quot;Per-digit cursors&amp;quot;&lt;&#x2F;a&gt; where the problems start.)&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;exotracker_full_subcolumn_cursor.png 1.25x&quot; src=&quot;exotracker_full_subcolumn_cursor.png&quot; alt=&quot;In ExoTracker, each subcolumn has a different background color. The instrument subcolumn has two digits plus padding. The cursor is located in the instrument subcolumn, and takes up both digits plus padding.&quot;&gt;
+  &lt;figcaption&gt;In ExoTracker, each subcolumn has a different background color. The instrument subcolumn has two digits plus padding. The cursor is located in the instrument subcolumn, and takes up both digits plus padding.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;As a result, many tracker conventions must be adapted to work with off-grid notes.&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Closely spaced notes&#x2F;events can cause text to draw over other text. I programmed lower events to erase the text drawn by upper events.&lt;&#x2F;li&gt;
+&lt;li&gt;The &amp;quot;events have height&amp;quot; model breaks down when off-grid events exist and you can change the zoom level. So I draw a line above every note, representing the instant in time the event occurs at (which I find easier to reason about than 1-row-tall events).
+&lt;ul&gt;
+&lt;li&gt;Initially, for each event, I drew a line across all subcolumns (even empty ones), but that became confusing when combined with closely spaced events erasing text in only occupied subcolumns (not empty ones).&lt;&#x2F;li&gt;
+&lt;li&gt;So now only occupied subcolumns have lines.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Pressing Delete 4 times will no longer delete all notes in the next 4 rows, because it won&#x27;t erase events between rows.
+&lt;ul&gt;
+&lt;li&gt;I felt that the alternative, where pressing Delete also deletes notes in between rows, would be more confusing and inflexible for users.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;So I made &amp;quot;cursor step&amp;quot; both snap to the grid and off-grid notes... which is actually rather janky and surprising.
+&lt;ul&gt;
+&lt;li&gt;The issue is that my code snaps to all events in the channel, not just events with a non-empty value in the cursor X position&#x27;s subcolumn. Changing this would complicate the code.&lt;&#x2F;li&gt;
+&lt;li&gt;To alleviate this, I turned off off-grid event snapping, and added a mode where pressing Delete (or entering a value) steps to the next event, regardless of the cursor&#x27;s X subcolumn. This is useful for deleting many events, adding or changing instruments, etc.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Trackers usually have gaps between note&#x2F;event&#x2F;volume&#x2F;effect, so I add padding around each subcolumn.&lt;&#x2F;li&gt;
+&lt;li&gt;If empty grid cells are drawn with dashes, then on-grid notes will erase the dash. But it&#x27;s not clear if off-grid or triplet notes should erase the dashes or not. I chose to replace dashes with horizontal gridlines. But they don&#x27;t indicate subcolumns, so I add colored backgrounds.
+&lt;ul&gt;
+&lt;li&gt;One alternative would be to draw dashes before drawing events, and simply erase dashes whenever text overlaps them. This looks fine with on-grid events, but with off-grid events, you can end up with partial dashes which might look a bit ugly.
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;In retrospect, this was probably a better idea, since colored backgrounds proved to be a disaster.&lt;&#x2F;strong&gt;&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;per-digit-cursors&quot;&gt;Per-digit cursors&lt;&#x2F;h2&gt;
+&lt;p&gt;Everything was more-or-less working, until I added per-digit cursors and the setup broke down. Suddenly the cursor width became highly inconsistent; the cursor is wider when you place it in the leftmost or rightmost digit of a subcolumn.&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;exotracker_cursor_positions.gif 1.25x&quot; src=&quot;exotracker_cursor_positions.gif&quot; alt=&quot;The effect subcolumn has three positions, or one character plus two digits. The cursor is wider in the left and right subcolumn, and narrower in the center.&quot;&gt;
+  &lt;figcaption&gt;The effect subcolumn has three positions, or one character plus two digits. The cursor is wider in the left and right subcolumn, and narrower in the center.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;So I can make the cursor narrower... now there&#x27;s a gap around the cursor. And several people have said the gap looks very weird, so this isn&#x27;t a good solution.&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;exotracker_gap_around_cursor.png 1.25x&quot; src=&quot;exotracker_gap_around_cursor.png&quot; alt=&quot;There is a gap between the left border of the subcolumn&#x27;s background, and the cursor&#x27;s left boundary. The same issue occurs with the right of each subcolumn.&quot;&gt;
+  &lt;figcaption&gt;There is a gap between the left border of the subcolumn&#x27;s background, and the cursor&#x27;s left boundary. The same issue occurs with the right of each subcolumn.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;exotracker_gap_around_cursor_2.png 1.25x&quot; src=&quot;exotracker_gap_around_cursor_2.png&quot; alt=&quot;There is a gap between the note subcolumn&#x27;s boundaries and the cursor&#x27;s boundaries.&quot;&gt;
+  &lt;figcaption&gt;There is a gap between the note subcolumn&#x27;s boundaries and the cursor&#x27;s boundaries.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;This is actually what FamiTracker does too, but it doesn&#x27;t look ugly because there aren&#x27;t background stripes.&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;famitracker_cursor_positions.gif 1.25x&quot; src=&quot;famitracker_cursor_positions.gif&quot; alt=&quot;I screen-recorded all cursor positions of FamiTracker into an animated GIF, and overlayed the frames into a single screenshot. There are gaps to the left and right of each subcolumn (note, instrument, volume, and effect). The composite screenshot is ugly.&quot;&gt;
+  &lt;figcaption&gt;I screen-recorded all cursor positions of FamiTracker into an animated GIF, and overlayed the frames into a single screenshot. There are gaps to the left and right of each subcolumn (note, instrument, volume, and effect). The composite screenshot is ugly.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;So do I make the stripes narrower?&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;exotracker_narrow_subcolumn_background.png 1.25x&quot; src=&quot;exotracker_narrow_subcolumn_background.png&quot; alt=&quot;The background color is confined to the width filled by text and selectable by the cursor. There are gray stripes around each subcolumn. It&#x27;s still ugly.&quot;&gt;
+  &lt;figcaption&gt;The background color is confined to the width filled by text and selectable by the cursor. There are gray stripes around each subcolumn. It&#x27;s still ugly.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;Get rid of the dividers too?&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;no_dividers.png 1.25x&quot; src=&quot;no_dividers.png&quot; alt=&quot;Now the subcolumn dividers are gone, replaced by gray stripes. It looks weird to have middle gaps wider than side gaps.&quot;&gt;
+  &lt;figcaption&gt;Now the subcolumn dividers are gone, replaced by gray stripes. It looks weird to have middle gaps wider than side gaps.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;p&gt;So I can make them the same width... but then either the note lines overlap, or they have gaps, or the widths are inconsistent. This will cause problems with mouse handling as well.&lt;&#x2F;p&gt;
+&lt;figure class=&quot;image&quot;&gt;
+  &lt;img srcset=&quot;no_dividers_rearranged.png 1.25x&quot; src=&quot;no_dividers_rearranged.png&quot; alt=&quot;The gray lines are rearranged, such that the width between subcolumns equals the width between a subcolumn and a channel divider. The note lines overlap.&quot;&gt;
+  &lt;figcaption&gt;The gray lines are rearranged, such that the width between subcolumns equals the width between a subcolumn and a channel divider. The note lines overlap.&lt;&#x2F;figcaption&gt;
+&lt;&#x2F;figure&gt;
+&lt;h2 id=&quot;a-solution&quot;&gt;A solution?&lt;&#x2F;h2&gt;
+&lt;p&gt;At this point, I feel that background stripes to indicate subcolumn boundaries, and cursors which occupy digits within a multi-digit subcolumn, are simply incompatible.&lt;&#x2F;p&gt;
+&lt;p&gt;If I want to keep that latter feature, I could remove background stripes and replace them with dashes, which are erased whenever text overlaps them. This looks fine with on-grid events, but with off-grid events, you can end up with partial dashes which might look a bit ugly.&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>ExoTracker Newsletter #1</title>
+		<published>2020-08-26T01:46:00-07:00</published>
+		<updated>2020-08-26T01:46:00-07:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-1/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-1/</id>
+		<content type="html">&lt;p&gt;I just finished implementing timeline entry editing. Since I have school coming up, I decided to release a demo of its current state. Since my summary was getting a bit too long to post in Discord, I decided to write a blog post &#x2F; newsletter.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;demo-download&quot;&gt;Demo download&lt;&#x2F;h2&gt;
+&lt;p&gt;Windows 64-bit: &lt;a href=&quot;https:&#x2F;&#x2F;ci.appveyor.com&#x2F;api&#x2F;buildjobs&#x2F;3e0uv6sxov74g50d&#x2F;artifacts&#x2F;exotracker-v1.0.60-dev.7z&quot;&gt;https:&#x2F;&#x2F;ci.appveyor.com&#x2F;api&#x2F;buildjobs&#x2F;3e0uv6sxov74g50d&#x2F;artifacts&#x2F;exotracker-v1.0.60-dev.7z&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Source: &lt;a href=&quot;https:&#x2F;&#x2F;gitlab.com&#x2F;nyanpasu64&#x2F;exotracker-cpp&#x2F;-&#x2F;tree&#x2F;timeline-editor&quot;&gt;https:&#x2F;&#x2F;gitlab.com&#x2F;nyanpasu64&#x2F;exotracker-cpp&#x2F;-&#x2F;tree&#x2F;timeline-editor&lt;&#x2F;a&gt; (currently commit d5386ea0). It only compiles in recent GCC and Clang (only tested Clang 10), due to using statement expressions.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;demo-notes&quot;&gt;Demo notes&lt;&#x2F;h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Press Space to enable note entry, and Enter to play.&lt;&#x2F;strong&gt; Unfortunately, note preview is not supported yet.&lt;&#x2F;li&gt;
+&lt;li&gt;ExoTracker uses a FamiTracker-style piano layout.&lt;&#x2F;li&gt;
+&lt;li&gt;Only Famicom&#x2F;NES APU1 is supported. Some demo songs have dual APU1 which can be used for composing.&lt;&#x2F;li&gt;
+&lt;li&gt;Notes, instruments, and volumes are supported. Effects are not.&lt;&#x2F;li&gt;
+&lt;li&gt;Try passing in names of sample documents as command-line arguments. Listed in order from most to least useful:
+&lt;ul&gt;
+&lt;li&gt;Partial songs: &lt;code&gt;dream-fragments&lt;&#x2F;code&gt;, &lt;code&gt;world-revolution&lt;&#x2F;code&gt; (default song)&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;empty&lt;&#x2F;code&gt; (add your own notes)&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;audio-test&lt;&#x2F;code&gt; (dual APU1) (sounds bad, but useful for finding audio stuttering)&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;block-test&lt;&#x2F;code&gt; (dual APU1) (rendering test for block system, no notes or events)&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;render-test&lt;&#x2F;code&gt; (sounds bad, negative octave text is too wide for the screen)&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Some sample documents have short and&#x2F;or looped blocks (the gray rectangles to the left of each channel), which are not possible in most other trackers (I don&#x27;t know if LSDj and C64 trackers support this). But right now, users can only create full-grid blocks, and cannot delete blocks.
+&lt;ul&gt;
+&lt;li&gt;The block system is powerful, but unfortunately not editable through the UI yet, so you can&#x27;t try it out to see useful it is.&lt;&#x2F;li&gt;
+&lt;li&gt;Pattern reuse is not implemented.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;All edits are undoable. Some but not all timeline edits save cursor position.&lt;&#x2F;li&gt;
+&lt;li&gt;There are buttons for reordering timeline entries. They&#x27;re supposed to have icons instead of text, but icons are only available on my machine.&lt;&#x2F;li&gt;
+&lt;li&gt;The actual timeline widget (list of rows) is unfinished and will be replaced with a custom-drawn widget.&lt;&#x2F;li&gt;
+&lt;li&gt;The audio code will lock up if you decrease the timeline row length until a block has a negative length 😉&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;timeline-system-overview&quot;&gt;Timeline system overview&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;strong&gt;tl;dr skip forward to &amp;quot;Demo feedback&amp;quot; if you want to just play with the program instead of reading documentation.&lt;&#x2F;strong&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;The frame&#x2F;order editor is replaced with a timeline editor, and its functionality is changed significantly.&lt;&#x2F;p&gt;
+&lt;p&gt;The pattern grid structure from existing trackers is carried over (under the name of timeline rows and grid cells). Each timeline row has its own length which can vary between rows (like OpenMPT, unlike FamiTracker). Each timeline row holds one timeline cell (or grid cell) per channel. However, unlike patterns, timeline cells do not contain events directly, but through several layers of indirection.&lt;&#x2F;p&gt;
+&lt;p&gt;A timeline cell can hold zero or more blocks, which carry a start and end time (in integer beats) and a pattern. These blocks have nonzero length, do not overlap in time, occur in increasing time order, and lie between 0 and the timeline cell&#x27;s length (the last block&#x27;s end time can take on a special value corresponding to &amp;quot;end of cell&amp;quot;)[1].&lt;&#x2F;p&gt;
+&lt;p&gt;Each block contains a single pattern, consisting of a list of events and an optional loop duration (in integer beats). The pattern starts playing when absolute time reaches the block&#x27;s start time, and stops playing when absolute time reaches the block&#x27;s end time. If the loop duration is set, whenever relative time (within the pattern) reaches the loop duration, playback jumps back to the pattern&#x27;s begin. A block can cut off a pattern&#x27;s events early when time reaches the block&#x27;s end time (either the pattern&#x27;s initial play or during a loop). However a block cannot start playback partway into a pattern (no plans to add support yet).&lt;&#x2F;p&gt;
+&lt;p&gt;Eventually, patterns can be reused in multiple blocks at different times (and possibly different channels).&lt;&#x2F;p&gt;
+&lt;p&gt;[1] I&#x27;m not sure what to do if a user shrinks a timeline row, which causes an numeric-end block to end past the cell, or an &amp;quot;end of cell&amp;quot; block to have a size ≤ 0, etc.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;motivation&quot;&gt;Motivation&lt;&#x2F;h3&gt;
+&lt;p&gt;The timeline system is intended to allow treating the program like FamiStudio or a tracker, with timestamps encoded relative to current pattern&#x2F;frame begin, and reuse at pattern-level granularity. If you try to enter a note&#x2F;volume&#x2F;effect in a region without a block in place, a block is automatically created in the current channel, filling all empty space available (up to an entire grid cell) (not implemented yet).&lt;&#x2F;p&gt;
+&lt;p&gt;It is also intended to have a similar degree of flexibility as a DAW like Reaper (fine-grained block splitting and looping). The tradeoff is that because global timestamps are relative to grid cell begin, blocks are not allowed to cross grid cell boundaries (otherwise it would be painful to convert between block&#x2F;pattern-relative and global timestamps).&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;unresolved-questions&quot;&gt;Unresolved questions&lt;&#x2F;h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Are the gray block rectangles (to the left of each channel) ugly? I&#x27;m planning to use those to allow dragging patterns around, resizing them, and distinguishing reused patterns through color.&lt;&#x2F;li&gt;
+&lt;li&gt;Should I rename the timeline to something else?
+&lt;ul&gt;
+&lt;li&gt;Sequence?&lt;&#x2F;li&gt;
+&lt;li&gt;Order? (I feel it&#x27;s bad because &amp;quot;order&amp;quot; implies every entry is merely the ID of a single pattern, but in reality is a container for 0 or more loopable patterns.)&lt;&#x2F;li&gt;
+&lt;li&gt;OpenMPT has an &amp;quot;order list&amp;quot; widget to edit a &amp;quot;sequence&amp;quot; of patterns; it uses two names for similar concepts.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;What should I call a row&#x2F;unit in the timeline editor? It&#x27;s treated as a coarse unit of time and a container for blocks&#x2F;patterns, but is not a pattern.
+&lt;ul&gt;
+&lt;li&gt;Grid row? Timeline&#x2F;sequence row? (I keep confusing &amp;quot;timeline row&amp;quot; with &amp;quot;pattern row&amp;quot;. &amp;quot;Grid&amp;quot; is concise, but I don&#x27;t know if it&#x27;s an unintuitive name.)&lt;&#x2F;li&gt;
+&lt;li&gt;Segment?&lt;&#x2F;li&gt;
+&lt;li&gt;(Timeline&#x2F;sequence) entry?&lt;&#x2F;li&gt;
+&lt;li&gt;Cell? (currently used for &amp;quot;one row, one channel&amp;quot;)&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;How should I improve my current behavior when adding and deleting timeline entries?
+&lt;ul&gt;
+&lt;li&gt;Should adding a new timeline entry move the cursor to the new entry&#x27;s row 0? Should undoing move the cursor to the same spot, move it to the old location, or leave the cursor in place?&lt;&#x2F;li&gt;
+&lt;li&gt;Should deleting an timeline entry move the cursor to the former entry&#x27;s row 0? Should undoing move the cursor to the same spot, move it to the old location, or leave the cursor in place?&lt;&#x2F;li&gt;
+&lt;li&gt;Eventually I&#x27;ll add the ability to right-click and add&#x2F;delete timeline entries other than the one the cursor is in. Should the cursor move to the right-clicked entry, and stay there after undoing?&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;li&gt;Once the timeline widget is implemented, what should it show?
+&lt;ul&gt;
+&lt;li&gt;Titles for each sequence entry?&lt;&#x2F;li&gt;
+&lt;li&gt;&amp;quot;Pattern overview&amp;quot; with coarse-grained visualizations of blocks (gray for unique blocks, colored for shared)? Should shared patterns have numbers? Names? Should all patterns have numbers (an idea I&#x27;m not a fan of)?&lt;&#x2F;li&gt;
+&lt;li&gt;Draw both (and somehow try to find enough room for both)?&lt;&#x2F;li&gt;
+&lt;li&gt;0CC has bookmarks and highlights, but doesn&#x27;t show all names.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;h2 id=&quot;feedback&quot;&gt;Feedback&lt;&#x2F;h2&gt;
+&lt;p&gt;If you find any crash bugs, let me know. (Some tricky-to-get-right areas were deleting the last row in the timeline, or deleting a long row and the cursor moves into the next, shorter, row.)&lt;&#x2F;p&gt;
+&lt;p&gt;If you have any UI or behavior suggestions, tell me too. (I personally think I got the code reasonably watertight, but the UI behavior is a toss-up and I have no clue how people will react.)&lt;&#x2F;p&gt;
+&lt;p&gt;You can report issues at &lt;a href=&quot;https:&#x2F;&#x2F;gitlab.com&#x2F;nyanpasu64&#x2F;exotracker-cpp&#x2F;-&#x2F;issues&quot;&gt;https:&#x2F;&#x2F;gitlab.com&#x2F;nyanpasu64&#x2F;exotracker-cpp&#x2F;-&#x2F;issues&lt;&#x2F;a&gt;.&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>Describing convolution using item-based indexing and inclusive ranges</title>
+		<published>2020-05-08T13:54:00-07:00</published>
+		<updated>2020-05-08T13:54:00-07:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/describing-convolution-using-item-based-indexing-and-inclusive-ranges/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/describing-convolution-using-item-based-indexing-and-inclusive-ranges/</id>
+		<content type="html">&lt;p&gt;&lt;em&gt;This is a follow-up to my previous post, &lt;a href=&quot;..&#x2F;the-gridline-mental-model-of-indexing-and-slicing&quot;&gt;&amp;quot;The gridline mental model of indexing and slicing&amp;quot;&lt;&#x2F;a&gt;. I split this out because it&#x27;s related to DSP as well as programming, and may not be as interesting to the broader programming audience.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;hr &#x2F;&gt;
+&lt;p&gt;In some cases, it&#x27;s useful to think of array indices as pointing to individual items (not fenceposts), and represent sets of items using inclusive ranges. For example, in DSP (digital signal processing), &amp;quot;signals&amp;quot; are effectively arrays of samples (AKA amplitudes) at signed-integer indices. If you have a signal of length N starting at index 0, you can treat it as an infinite signal that&#x27;s only nonzero at indices &lt;code&gt;[0, N-1]&lt;&#x2F;code&gt; inclusive. All other indices (negative indices, and indices N and above) have a value of zero.&lt;&#x2F;p&gt;
+&lt;p&gt;Convolution is a process where you &amp;quot;spread out&amp;quot; each nonzero element in a signal by an &amp;quot;impulse response&amp;quot;. One example of convolution is taking a picture with a shaky or defocused camera, where we assume all objects in the image are distorted or defocused equally.&lt;&#x2F;p&gt;
+&lt;p&gt;Every point of light is smudged into a blob or streak. If you assume the point of light starts at an &amp;quot;original position&amp;quot;, the blob or streak is an image (two-dimensional signal) which maps positions (relative to the point of light) onto intensities. This signal is known as an &amp;quot;impulse response&amp;quot;. Every object gets &amp;quot;smudged&amp;quot; by that impulse response (blob or streak). This process of &amp;quot;smudging&amp;quot; is convolving the image by the impulse response.&lt;&#x2F;p&gt;
+&lt;p&gt;Convolution also applies to 1-dimensional signals like audio. Filtering or adding reverb to audio is convolving the signal by an impulse response (which is the result of sending a short impulse or pop through the filter&#x2F;reverb).&lt;&#x2F;p&gt;
+&lt;p&gt;If you convolve (or smudge) a one-dimensional signal of length &lt;code&gt;L&lt;&#x2F;code&gt; (which can only be nonzero at indices &lt;code&gt;[0, L-1]&lt;&#x2F;code&gt;) by an impulse response of length &lt;code&gt;P&lt;&#x2F;code&gt; (which can only be nonzero at indices &lt;code&gt;[0, P-1]&lt;&#x2F;code&gt;), the resulting signal can only be nonzero at indices &lt;code&gt;[0, (L-1) + (P-1)]&lt;&#x2F;code&gt; or &lt;code&gt;[0, L+P-2]&lt;&#x2F;code&gt;, and will have length &lt;code&gt;L+P-1&lt;&#x2F;code&gt;. (I think this formula also generalizes to two or more dimensions!)&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;inclusive-ranges-in-block-convolution-very-technical&quot;&gt;Inclusive ranges in block convolution (very technical)&lt;&#x2F;h2&gt;
+&lt;p&gt;Convolving a long signal by a short kernel (aka impulse response) of length &lt;code&gt;P&lt;&#x2F;code&gt; is often faster if you split the long signal into chunks, then compute the output in blocks of length &lt;code&gt;L&lt;&#x2F;code&gt;. This is because the FFT has runtime O(N log N), and one large FFT can be slower than many smaller FFTs.&lt;&#x2F;p&gt;
+&lt;p&gt;One method is overlap-add convolution. If you break a long signal into blocks of length &lt;code&gt;L&lt;&#x2F;code&gt;, each block is only nonzero between &lt;code&gt;[0, L-1]&lt;&#x2F;code&gt;. And if your filter kernel has length &lt;code&gt;P&lt;&#x2F;code&gt; and starts at index 0, it&#x27;s only nonzero between &lt;code&gt;[0, P-1]&lt;&#x2F;code&gt;. And if you convolve signals of length &lt;code&gt;L&lt;&#x2F;code&gt; and &lt;code&gt;P&lt;&#x2F;code&gt;, the largest index with nonzero amplitude is &lt;code&gt;L+P-2&lt;&#x2F;code&gt;. And the resulting signal has support &lt;code&gt;[0, L+P-2]&lt;&#x2F;code&gt; and length &lt;code&gt;L+P-1&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Another example is overlap-save convolution. If you pick a block of &lt;code&gt;L+P-1&lt;&#x2F;code&gt; samples from the input signal, the &lt;em&gt;beginning&lt;&#x2F;em&gt; of each convolution output is corrupted and must be discarded. In particular, trailing samples at indices ≤ &lt;code&gt;-1&lt;&#x2F;code&gt; are spread out by a filter kernel of support &lt;code&gt;[0, P-1]&lt;&#x2F;code&gt;, corrupting outputs &lt;code&gt;[0, P-2]&lt;&#x2F;code&gt;, forcing you to discard the first &lt;code&gt;P-1&lt;&#x2F;code&gt; samples. If you don&#x27;t prepend zeros to the input signal, overlap-save convolution loses the first &lt;code&gt;P-1&lt;&#x2F;code&gt; samples of the input&#x2F;output.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;credits&quot;&gt;Credits&lt;&#x2F;h2&gt;
+&lt;p&gt;Thanks to ax6 for helping me edit this article.&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>The gridline mental model of indexing and slicing</title>
+		<published>2020-05-08T13:26:00-07:00</published>
+		<updated>2020-05-08T13:26:00-07:00</updated>
+		<link href="https://nyanpasu64.gitlab.io/blog/the-gridline-mental-model-of-indexing-and-slicing/" type="text/html"/>
+		<id>https://nyanpasu64.gitlab.io/blog/the-gridline-mental-model-of-indexing-and-slicing/</id>
+		<content type="html">&lt;p&gt;&lt;em&gt;Republished from my &lt;a href=&quot;https:&#x2F;&#x2F;gist.github.com&#x2F;nyanpasu64&#x2F;c01e50ad97b1a92ccea374c3f941dd93#file-index-md&quot;&gt;Github gist&lt;&#x2F;a&gt;.&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Integer indexes can either represent fenceposts (gridlines) or item pointers, and there&#x27;s a sort of duality.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;mental-model-gridline-based-asymmetric-indexing&quot;&gt;Mental model: Gridline-based &amp;quot;asymmetric indexing&amp;quot;&lt;&#x2F;h2&gt;
+&lt;p&gt;Memory or data is treated as a &amp;quot;pool of memory&amp;quot;. Pointers and indices do not refer to &lt;em&gt;elements&lt;&#x2F;em&gt;, but &lt;em&gt;gaps between elements&lt;&#x2F;em&gt; (in other words, fenceposts or gridlines). This is the same way I think about wall clocks and musical time subdivision, where time is continuous and timestamps refer to &lt;em&gt;instants&lt;&#x2F;em&gt; which separate regions of time.&lt;&#x2F;p&gt;
+&lt;p&gt;In C and Python, array indexing can be interpreted via a mental model of gridlines. If &lt;code&gt;a&lt;&#x2F;code&gt; is an array holding elements, then &lt;code&gt;a[x]&lt;&#x2F;code&gt; is the element after gridline &lt;code&gt;x&lt;&#x2F;code&gt;. I call this &amp;quot;asymmetric indexing&amp;quot; (since every pointer refers to memory lying on the right side of it), but it&#x27;s a useful convention. In C, if the array &lt;code&gt;a&lt;&#x2F;code&gt; holds elements of size &lt;code&gt;s&lt;&#x2F;code&gt;, &lt;code&gt;a[x]&lt;&#x2F;code&gt; occupies bytes from &lt;code&gt;(byte*)(a) + s*x&lt;&#x2F;code&gt; up until &lt;code&gt;(byte*)(a) + s*(x+1)&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;In Python, if &lt;code&gt;x&lt;&#x2F;code&gt; is a list (actually a resizable contiguous array), &lt;code&gt;x[0]&lt;&#x2F;code&gt; is the first element (after gridline 0), and &lt;code&gt;x[-1]&lt;&#x2F;code&gt; is the last element, 1 before the end (after gridline &lt;code&gt;len(x)-1&lt;&#x2F;code&gt;). This behavior matches a subset of modular arithmetic.&lt;&#x2F;p&gt;
+&lt;p&gt;In C++, &lt;code&gt;iterator&lt;&#x2F;code&gt; and &lt;code&gt;reverse_iterator&lt;&#x2F;code&gt; both point to fenceposts between items. An array can have valid iterators or reverse iterators pointing to &amp;quot;before the first element&amp;quot;, &amp;quot;after the last element&amp;quot;, or anywhere in between.&lt;&#x2F;p&gt;
+&lt;p&gt;Dereferencing a forward iterator accesses the element &lt;em&gt;after&lt;&#x2F;em&gt; the gridline, much like &lt;code&gt;*ptr&lt;&#x2F;code&gt; with a raw pointer. However, dereferencing a reverse iterator accesses the element &lt;em&gt;before&lt;&#x2F;em&gt; the gridline, which compiles to &lt;code&gt;*(ptr - 1)&lt;&#x2F;code&gt;. As a result, &lt;code&gt;reverse_iterator&lt;&#x2F;code&gt; appears to be slightly slower on actual CPUs: &lt;a href=&quot;https:&#x2F;&#x2F;stackoverflow.com&#x2F;a&#x2F;2549554&quot;&gt;https:&#x2F;&#x2F;stackoverflow.com&#x2F;a&#x2F;2549554&lt;&#x2F;a&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;cppreference.com has a diagram attempting to explain &lt;code&gt;reverse_iterator&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;http:&#x2F;&#x2F;upload.cppreference.com&#x2F;mwiki&#x2F;images&#x2F;3&#x2F;39&#x2F;range-rbegin-rend.svg&quot; alt=&quot;cppreference.com reverse_iterator diagram&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;I think the diagram is badly designed and unnecessarily confusing, with two arrows coming from the top of the diagram, and two pictures of the array offset by one element. It&#x27;s technically not wrong, but it assumes that pointers point to &lt;em&gt;objects&lt;&#x2F;em&gt;, not &lt;em&gt;fenceposts&lt;&#x2F;em&gt;, which is a very inelegant mental model for this purpose.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;alternative-mental-model-item-based-indexing&quot;&gt;Alternative mental model: Item-based indexing&lt;&#x2F;h2&gt;
+&lt;p&gt;In pure math and DSP, and at high levels of abstraction, you can instead treat each item as an indivisible entity, rather than occupying a region of memory bounded between 2 endpoints. Then indexing points to an object, not an address or gridline in memory. In this mental model, slicing behaves quite differently.&lt;&#x2F;p&gt;
+&lt;p&gt;You can choose to index from 0 or 1. Indexing from 0 or 1 is somewhat orthogonal to gridline-based or item-based indexing. However, most gridline-based languages index from 0, and many item-based languages index from 1.&lt;&#x2F;p&gt;
+&lt;p&gt;The R language operates under this mental model. Much like mathematical notation, indexes begin at 1, and ranges of items &lt;code&gt;a[1:5]&lt;&#x2F;code&gt; are inclusive on both ends. In fact, &lt;code&gt;1:5&lt;&#x2F;code&gt; generates a vector of integers &lt;code&gt;1 2 3 4 5&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;The item-based mental model (with inclusive ranges) is useful in some cases, for example in DSP. However I moved that to a separate article, &lt;a href=&quot;..&#x2F;describing-convolution-using-item-based-indexing-and-inclusive-ranges&quot;&gt;&amp;quot;Describing convolution using item-based indexing and inclusive ranges&amp;quot;&lt;&#x2F;a&gt;, since it&#x27;s not closely related to indexing.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;gridline-based-slicing-and-closed-closed-indexing&quot;&gt;Gridline-based slicing and closed-closed indexing&lt;&#x2F;h2&gt;
+&lt;p&gt;Assume you have an array &lt;code&gt;a&lt;&#x2F;code&gt; with &lt;code&gt;N&lt;&#x2F;code&gt; elements.&lt;&#x2F;p&gt;
+&lt;p&gt;For a region between gridlines &lt;code&gt;a ≤ b&lt;&#x2F;code&gt; to be valid, &lt;code&gt;a ≥ arr&lt;&#x2F;code&gt; and &lt;code&gt;b ≤ arr + N&lt;&#x2F;code&gt;. Note that &lt;code&gt;b&lt;&#x2F;code&gt; (and also &lt;code&gt;a&lt;&#x2F;code&gt;) is allowed to be equal to the final gridline, which is a perfectly valid gridline! The only reason people consider it &amp;quot;out of bounds&amp;quot; or &amp;quot;past the end of the array&amp;quot; is because it has no element to its right (cannot be used for asymmetric indexing).&lt;&#x2F;p&gt;
+&lt;p&gt;What are the valid indices into an array of length N, treating the first element as 0?&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Conventional wisdom believes that valid array indices lie in a closed-open range.&lt;&#x2F;li&gt;
+&lt;li&gt;begin ∈ [0..N) since element 0 is valid, but element 0 is past the end of the array.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Another approach is to model &amp;quot;valid array indices&amp;quot; as a special case of &amp;quot;valid array slices&amp;quot;, where the slice is of length 1. Under this approach, valid indices lie within a &amp;quot;closed-closed&amp;quot; inclusive range.&lt;&#x2F;p&gt;
+&lt;p&gt;What are the valid starting indices of length-1 regions within an array?&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;begin ≥ 0, otherwise the start of the region will lie outside the array.&lt;&#x2F;li&gt;
+&lt;li&gt;begin + 1 ≤ N, otherwise the end of the region will lie outside the array.&lt;&#x2F;li&gt;
+&lt;li&gt;begin ∈ [0..N-1]&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;What are the valid starting indices of length-2 regions within an array?&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;begin ≥ 0, otherwise the start of the region will lie outside the array.&lt;&#x2F;li&gt;
+&lt;li&gt;begin + 2 ≤ N, otherwise the end of the region will lie outside the array.&lt;&#x2F;li&gt;
+&lt;li&gt;begin ∈ [0..N-2]&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;In summary, obtaining indexes from inclusive ranges are good because &amp;quot;valid indexes&amp;quot; are a special case of &amp;quot;valid slice starting indices&amp;quot; which are modeled well by inclusive ranges. Under this line of logic, a pair of pointers, &lt;code&gt;(pointer to begin, pointer to end)&lt;&#x2F;code&gt;, describes a slice of memory. I feel like this mental model is underused, and explaining it would help people understand C++&#x27;s &lt;code&gt;reverse_iterator&lt;&#x2F;code&gt; better.&lt;&#x2F;p&gt;
+&lt;p&gt;Obtaining indexes from half-open ranges are good if you either assume &amp;quot;asymmetric indexing&amp;quot; (don&#x27;t think in terms of slicing), or treat each item as an indivisible entity (alternative mental model, zero-indexed). Under this line of logic, &lt;code&gt;(pointer to begin, pointer to end)&lt;&#x2F;code&gt; is interpreted as &lt;code&gt;(pointer to first element, pointer past the final element)&lt;&#x2F;code&gt;, which is how how I&#x27;ve seen it be described by some people.&lt;&#x2F;p&gt;
+&lt;p&gt;I feel languages should have both half-open ranges to generate indexes, and inclusive ranges to generate slice endpoints. Python only has half-open ranges, and math only has inclusive ranges. Rust has both, but unfortunately inclusive ranges are very slow and unoptimized compared to half-open ranges.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;issue-negative-indexing-is-asymmetric&quot;&gt;Issue: negative indexing is asymmetric&lt;&#x2F;h2&gt;
+&lt;p&gt;To me, negative indexing is awkward in python. The first 2 elements in an list are &lt;code&gt;a[0]&lt;&#x2F;code&gt; and &lt;code&gt;a[1]&lt;&#x2F;code&gt;, but the last 2 elements are &lt;code&gt;a[-1]&lt;&#x2F;code&gt; and &lt;code&gt;a[-2]&lt;&#x2F;code&gt;. Interpreting this under the grid model, this arises because indexing &lt;code&gt;a[i]&lt;&#x2F;code&gt; takes the element &lt;em&gt;after&lt;&#x2F;em&gt; gridline &lt;code&gt;i&lt;&#x2F;code&gt;, which is inherently asymmetric.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;issue-modular-negative-slicing-and-circularity-is-ambiguous&quot;&gt;Issue: modular negative slicing and circularity is ambiguous&lt;&#x2F;h2&gt;
+&lt;p&gt;In Python, &lt;em&gt;item indexes&lt;&#x2F;em&gt; into a length-N array (where integer indices refer to the item after the gridline) conform to mod-N arithmetic. Each integer index is either interpreted mod N, or raises an &amp;quot;out of bounds&amp;quot; exception.&lt;&#x2F;p&gt;
+&lt;p&gt;However, &lt;em&gt;slice endpoints&lt;&#x2F;em&gt; do &lt;em&gt;not&lt;&#x2F;em&gt; quite conform to modular indexing mod N. This is because fenceposts 0 and N are distinct gridlines in memory, but are conflated under mod-N operation.&lt;&#x2F;p&gt;
+&lt;p&gt;In Python, if you want to access the last 2 elements in a length-N array, you can write &lt;code&gt;a[N-2:N-0]&lt;&#x2F;code&gt;. If you treat slice endpoints as modular indexes mod N, you can abbreviate this to &lt;code&gt;[-2:-0]&lt;&#x2F;code&gt;. But this instead returns an empty slice from N-2 to 0, since unlike array indexes, Python slice endpoints don&#x27;t quite conform to modular indexing. And Python has no concept of a &amp;quot;negative zero&amp;quot; integer index meaning something different.&lt;&#x2F;p&gt;
+&lt;p&gt;Because CSS grid has no fencepost 0, it sidesteps this issue entirely. Negating a slice endpoint always switches between &amp;quot;counting from the left&amp;quot; and &amp;quot;counting from the right&amp;quot;.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;numpy-violates-modular-arithmetic&quot;&gt;Numpy violates modular arithmetic&lt;&#x2F;h3&gt;
+&lt;p&gt;One place where this issue comes up is in Numpy. By analogy, in Python, you can assign to list slices to replace part of a list with other elements. For example, you can write &lt;code&gt;a[x:y] = [...]&lt;&#x2F;code&gt;. To insert one item, you can write &lt;code&gt;a[x:x] = [1]&lt;&#x2F;code&gt;. Given Python&#x27;s slicing rules, &lt;code&gt;a[0:0] = [1]&lt;&#x2F;code&gt; inserts an element before the beginning of the list, and &lt;code&gt;a[-1:-1] = [1]&lt;&#x2F;code&gt; inserts an element &lt;em&gt;before&lt;&#x2F;em&gt; the last element of the list (not at the end of the list!) This is better written as &lt;code&gt;a.insert(x, 1)&lt;&#x2F;code&gt; where x can be any valid fencepost (including N which is not a valid index).&lt;&#x2F;p&gt;
+&lt;p&gt;Numpy has an operation called &lt;code&gt;np.stack()&lt;&#x2F;code&gt; where you combine two or more N-dimensional arrays into a N+1-dimensional array. All input arrays have identical &lt;code&gt;shape: N-dimensional tuple&lt;&#x2F;code&gt; determining the dimensionality needed to index the array all the way. The output array has the same &lt;code&gt;shape&lt;&#x2F;code&gt; as the inputs, but with an extra element equal to the number of arrays you&#x27;ve passed in.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;np.stack(axis=0)&lt;&#x2F;code&gt; is analogous to &lt;code&gt;shape.insert(0, number of inputs)&lt;&#x2F;code&gt;. But &lt;code&gt;np.stack(axis=-1)&lt;&#x2F;code&gt; is analogous to &lt;code&gt;shape.insert(N - 0, number of inputs)&lt;&#x2F;code&gt;, not &lt;code&gt;N - 1&lt;&#x2F;code&gt;. 🤢&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;css-grid-fixes-negative-slicing-but-not-negative-indexing&quot;&gt;CSS Grid fixes negative slicing but not negative indexing&lt;&#x2F;h3&gt;
+&lt;p&gt;CSS Grid allows web developers to dynamically position elements in table-like grids. In this case, fenceposts are &lt;em&gt;literally&lt;&#x2F;em&gt; gridlines between on-screen items. A layout with N columns (declared using &lt;code&gt;grid-template-columns&lt;&#x2F;code&gt;) has N+1 gridlines. (Tracks are columns or rows.)&lt;&#x2F;p&gt;
+&lt;p&gt;Interestingly, gridline 0 does not exist. Gridline 1 is the leftmost gridline before the first item, and gridline N+1 is the rightmost gridline after the last item. Also, gridline -1 is the rightmost gridline, and gridline -(N+1) is the leftmost gridline. This is 1 greater than Python&#x27;s positive slicing, and 1 smaller than Python&#x27;s negative slicing.&lt;&#x2F;p&gt;
+&lt;p&gt;In the case of &lt;code&gt;grid-column&lt;&#x2F;code&gt; and &lt;code&gt;grid-row&lt;&#x2F;code&gt;, when inserting an item into the table, you can &amp;quot;slice&amp;quot; using &lt;code&gt;a &#x2F; b&lt;&#x2F;code&gt; syntax to specify a start and end gridline. Or you can &amp;quot;index&amp;quot; using &lt;code&gt;a&lt;&#x2F;code&gt; syntax, so the browser infers &lt;code&gt;b = a+1&lt;&#x2F;code&gt; (the item spans one track = row or column). Which is &lt;em&gt;almost&lt;&#x2F;em&gt; an amazing idea.  Except when &lt;code&gt;a&lt;&#x2F;code&gt; is -1, then &lt;code&gt;b&lt;&#x2F;code&gt; is inferred to be 0, not -2. And you end up with an item placed &amp;quot;out of bounds&amp;quot; and past the last column and gridline you declared. They were &lt;em&gt;so close&lt;&#x2F;em&gt; to achieving perfect symmetry between positive and negative indexing. At least in CSS you won&#x27;t get any buffer overflows 😉&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;text-field-cursor-affinity&quot;&gt;Text field cursor affinity&lt;&#x2F;h3&gt;
+&lt;p&gt;A related issue is in text editing. If you&#x27;re in a long paragraph and press the End key on a keyboard, the cursor will be placed after the last word in the current line, and after the space too. If you go to the next line and press the Home key, the cursor will be placed before the first word. But these 2 locations represent the same byte index into the text document! At this point, if you press the left and right arrow keys, you&#x27;ll get unusual cursor behavior which differs between programs:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Sublime Text snaps the cursor to the previous line (which I don&#x27;t like).&lt;&#x2F;li&gt;
+&lt;li&gt;VS Code keeps the cursor on the current line.&lt;&#x2F;li&gt;
+&lt;li&gt;Chrome, Notepad, and Qt apps snap the cursor to the next line.&lt;&#x2F;li&gt;
+&lt;li&gt;Firefox treats &amp;quot;end of the current line&amp;quot; and &amp;quot;beginning of the second line&amp;quot; as separate locations. If you&#x27;re at the end of a line (the same spot as the beginning of the next word), you need to press Right twice to get 1 character into the next word!&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;The same behavior occurs if a single very long word is wrapped across multiple lines. And each program listed above behaves identically, regardless if you&#x27;re wrapping a paragraph or single word.&lt;&#x2F;p&gt;
+&lt;p&gt;This behavior was briefly described in &lt;a href=&quot;https:&#x2F;&#x2F;lord.io&#x2F;blog&#x2F;2019&#x2F;text-editing-hates-you-too&#x2F;&quot;&gt;https:&#x2F;&#x2F;lord.io&#x2F;blog&#x2F;2019&#x2F;text-editing-hates-you-too&#x2F;&lt;&#x2F;a&gt; &amp;quot;Affinity&amp;quot;. That site only mentions single long words wrapped across multiple lines.&lt;&#x2F;p&gt;
+&lt;p&gt;Reality is awful. There is no perfect solution.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;ring-buffers&quot;&gt;Ring buffers&lt;&#x2F;h3&gt;
+&lt;p&gt;(Note that I am not an expert on ring buffers.)&lt;&#x2F;p&gt;
+&lt;p&gt;A ring buffer contains a length-N array, and (one design choice is) two pointers&#x2F;indices into the array. The assumption is that the &amp;quot;write pointer&amp;quot; points to (the gridline before) the first element not written yet, and the &amp;quot;read pointer&amp;quot; points to (the gridline before) the first element which can be read. If a ring buffer has begin_ptr == end_ptr, is it empty or full? You can&#x27;t tell! One solution is to always leave 1 element unwritten at all times. Another is to keep one pointer and a length counter (which ranges from 0 through N inclusive).&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;prior-art&quot;&gt;Prior art&lt;&#x2F;h2&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;wiki.c2.com&#x2F;?FencePostError&quot;&gt;https:&#x2F;&#x2F;wiki.c2.com&#x2F;?FencePostError&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;news.ycombinator.com&#x2F;item?id=6601515&quot;&gt;https:&#x2F;&#x2F;news.ycombinator.com&#x2F;item?id=6601515&lt;&#x2F;a&gt;, first comment &lt;a href=&quot;https:&#x2F;&#x2F;news.ycombinator.com&#x2F;item?id=6602497&quot;&gt;https:&#x2F;&#x2F;news.ycombinator.com&#x2F;item?id=6602497&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+</content>
+	</entry>
+</feed>

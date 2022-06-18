@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  
+<title>Home | nyanpasu64&#x27;s blog</title>
+
+
+
+<meta property="og:title" content="Home">
+
+
+
+<meta name="author" content="nyanpasu64">
+
+
+<meta property="og:locale" content="en-US">
+
+
+<meta name="description" content="Adventures in programming, DSP, and chiptune">
+<meta property="og:description" content="Adventures in programming, DSP, and chiptune">
+
+
+
+<link rel="canonical" href="https://nyanpasu64.gitlab.io/">
+<meta property="og:url" content="https://nyanpasu64.gitlab.io/">
+
+
+
+<meta property="og:site_name" content="nyanpasu64&#x27;s blog" />
+
+
+
+
+
+
+
+
+
+
+
+  <meta name="twitter:card" content="summary">
+
+
+
+  <meta property="twitter:title" content="Home">
+
+
+
+
+
+
+
+
+<script type="application/ld+json">
+{
+  "author": {
+    "@type":"Person",
+	  "name":"nyanpasu64",
+  },
+  "description": "Adventures in programming, DSP, and chiptune",
+  "url": "https://nyanpasu64.gitlab.io/",
+  "@context":"https://schema.org",
+  "@type": "WebSite",
+  "headline": "Home"
+  
+}
+</script>
+
+  <link rel="stylesheet" href="https://nyanpasu64.gitlab.io/main.css">
+  <link rel="stylesheet" href="https://nyanpasu64.gitlab.io/assets/css/CrimsonProital@0400070014001700.css">
+
+  <link rel="icon" type="image/png" sizes="32x32" href="https://nyanpasu64.gitlab.io/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://nyanpasu64.gitlab.io/favicon-16x16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://nyanpasu64.gitlab.io/apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
+
+  
+    <link type="application/atom+xml" rel="alternate" href="https://nyanpasu64.gitlab.io/atom.xml" title="nyanpasu64&#x27;s blog" />
+  
+
+  
+
+  
+  
+</head>
+
+<body>
+  
+  <nav class="nav">
+    <div class="nav-container">
+      <a href="https://nyanpasu64.gitlab.io">
+        <h2 class="nav-title">nyanpasu64&#x27;s blog</h2>
+      </a>
+      <ul>
+        
+          
+            <li><a href="https://nyanpasu64.gitlab.io">Posts</a></li>
+          
+        
+      </ul>
+    </div>
+  </nav>
+  
+
+  <main>
+    
+<div class="post" style="padding-bottom: 0px;">
+		<h1 class="post-title">Home</h1>
+		<div class="post-line"></div>
+		<p>Hi there! I’m nyanpasu64 and I like headpats.</p>
+<p>This is my blog about low-level and human-scale programming, DSP, and computer music and chiptune, where I share things that others might enjoy or learn from.</p>
+
+	</div>
+
+
+	<div class="catalogue">
+		<a href="https://nyanpasu64.gitlab.io/blog/low-latency-audio-output-duplex-alsa/" class="catalogue-item">
+  <div><time datetime="2022-06-14T00:00:00-07:00" class="catalogue-time">June 14, 2022</time>
+    <h1 class="catalogue-title">Implementing low-latency shared&#x2F;exclusive mode audio output&#x2F;duplex</h1>
+    <div class="catalogue-line"></div><p>Audio output and duplex is actually quite tricky, and even libraries like RtAudio's ALSA backend get it wrong. If you're writing an app that needs low-latency audio without glitches, the proper implementation architecture differs between apps talking to pull-mode (well-designed, low-latency) mixing daemons, and apps talking to hardware. 
+    </div>
+</a><a href="https://nyanpasu64.gitlab.io/blog/the-missing-guide-for-arch-linux-pkgbuild-s-pkgver-version-numbers/" class="catalogue-item">
+  <div><time datetime="2021-08-13T07:21:00-07:00" class="catalogue-time">August 13, 2021</time>
+    <h1 class="catalogue-title">The missing guide for Arch Linux PKGBUILD&#x27;s pkgver() version numbers</h1>
+    <div class="catalogue-line"></div><p>Pacman's version comparison algorithm was designed over a decade ago to properly sort many categories of real-world version numbers, and is now set in stone, quirks and all. Later on, the AUR developed pkgver() conventions and templates which turn Git commits into version numbers…</p></div>
+</a><a href="https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-2-pivoting-to-snes/" class="catalogue-item">
+  <div><time datetime="2021-03-10T00:00:00-08:00" class="catalogue-time">March 10, 2021</time>
+    <h1 class="catalogue-title">ExoTracker Newsletter #2 - Pivoting to SNES, designing an instrument list</h1>
+    <div class="catalogue-line"></div><p>For those of you who aren't already aware, ExoTracker is a tracker-like composing tool, based around subdividing beats instead of integer rows. This allows the user to place notes at arbitrary fractions of a beat (like sheet music), and additionally allows tracker-like delay effe…</p></div>
+</a><a href="https://nyanpasu64.gitlab.io/blog/an-unsafe-tour-of-rust-s-send-and-sync/" class="catalogue-item">
+  <div><time datetime="2021-01-01T06:54:00-08:00" class="catalogue-time">January  1, 2021</time>
+    <h1 class="catalogue-title">An unsafe tour of Rust&#x27;s Send and Sync</h1>
+    <div class="catalogue-line"></div><p>Rust's concurrency safety is based around the <code>Send</code> and <code>Sync</code> traits. For people writing safe code, you don't really need to understand these traits on a deep level, only enough to satisfy the compiler when it spits errors at you (or switch from <code>std</code> threads to Crossbeam scoped threads to make errors go away).
+    </div>
+</a><a href="https://nyanpasu64.gitlab.io/blog/exotracker-issues-abandoning-the-grid/" class="catalogue-item">
+  <div><time datetime="2020-10-10T19:16:00-07:00" class="catalogue-time">October 10, 2020</time>
+    <h1 class="catalogue-title">ExoTracker Issues - Abandoning the grid</h1>
+    <div class="catalogue-line"></div><p>Trackers have decades of design, with interlocking features and design decisions, many based on the assumption that every event is quantized on a grid:
+
+You don't need lines above events, since it's obvious which row the event is in.
+
+In regular trackers, events are treated as ta…</p></div>
+</a><a href="https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-1/" class="catalogue-item">
+  <div><time datetime="2020-08-26T01:46:00-07:00" class="catalogue-time">August 26, 2020</time>
+    <h1 class="catalogue-title">ExoTracker Newsletter #1</h1>
+    <div class="catalogue-line"></div><p>I just finished implementing timeline entry editing. Since I have school coming up, I decided to release a demo of its current state. Since my summary was getting a bit too long to post in Discord, I decided to write a blog post / newsletter.
+Demo download
+Windows 64-bit: https:/…</p></div>
+</a><a href="https://nyanpasu64.gitlab.io/blog/describing-convolution-using-item-based-indexing-and-inclusive-ranges/" class="catalogue-item">
+  <div><time datetime="2020-05-08T13:54:00-07:00" class="catalogue-time">May  8, 2020</time>
+    <h1 class="catalogue-title">Describing convolution using item-based indexing and inclusive ranges</h1>
+    <div class="catalogue-line"></div><p>This is a follow-up to my previous post, &quot;The gridline mental model of indexing and slicing&quot;. I split this out because it's related to DSP as well as programming, and may not be as interesting to the broader programming audience.
+
+In some cases, it's useful to think of …</p></div>
+</a><a href="https://nyanpasu64.gitlab.io/blog/the-gridline-mental-model-of-indexing-and-slicing/" class="catalogue-item">
+  <div><time datetime="2020-05-08T13:26:00-07:00" class="catalogue-time">May  8, 2020</time>
+    <h1 class="catalogue-title">The gridline mental model of indexing and slicing</h1>
+    <div class="catalogue-line"></div><p>Republished from my Github gist.
+Integer indexes can either represent fenceposts (gridlines) or item pointers, and there's a sort of duality.
+Mental model: Gridline-based &quot;asymmetric indexing&quot;
+Memory or data is treated as a &quot;pool of memory&quot;. Pointers and indic…</p></div>
+</a>
+	</div>
+	<div class="pagination">
+		
+		
+		
+	</div>
+
+
+  </main>
+
+  
+  <footer>
+    <span>Adventures in programming, DSP, and chiptune.<br>Made with <a href="https://www.getzola.org">Zola</a> using the
+      <a href="https://github.com/aaranxu/tale-zola">Tale-Zola</a> theme
+      (<a href="https://github.com/nyanpasu64/tale-zola">modified</a>).
+    </span>
+  </footer>
+  
+</body>
+</html>

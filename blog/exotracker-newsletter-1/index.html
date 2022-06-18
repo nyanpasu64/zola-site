@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  
+<title>ExoTracker Newsletter #1 | nyanpasu64&#x27;s blog</title>
+
+
+
+<meta property="og:title" content="ExoTracker Newsletter #1">
+
+
+
+<meta name="author" content="nyanpasu64">
+
+
+<meta property="og:locale" content="en-US">
+
+
+<meta name="description" content="Adventures in programming, DSP, and chiptune">
+<meta property="og:description" content="Adventures in programming, DSP, and chiptune">
+
+
+
+<link rel="canonical" href="https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-1/">
+<meta property="og:url" content="https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-1/">
+
+
+
+<meta property="og:site_name" content="nyanpasu64&#x27;s blog" />
+
+
+
+
+
+  <meta property="og:type" content="article" />
+  <meta property="article:published_time" content="2020-08-26T01:46:00-07:00">
+
+
+
+  <link rel="prev" href="https://nyanpasu64.gitlab.io/blog/describing-convolution-using-item-based-indexing-and-inclusive-ranges/">
+
+
+
+
+
+  <meta name="twitter:card" content="summary">
+
+
+
+  <meta property="twitter:title" content="ExoTracker Newsletter #1">
+
+
+
+
+
+
+
+
+<script type="application/ld+json">
+{
+  "author": {
+    "@type":"Person",
+	  "name":"nyanpasu64",
+  },
+  "description": "Adventures in programming, DSP, and chiptune",
+  "url": "https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-1/",
+  "@context":"https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "ExoTracker Newsletter #1"
+  
+    
+    
+      "datePublished":"2020-08-26T01:46:00-07:00",
+    
+    "mainEntityOfPage":{
+      "@type":"WebPage",
+      "@id":"https://nyanpasu64.gitlab.io/blog/exotracker-newsletter-1/"
+    },
+  
+}
+</script>
+
+  <link rel="stylesheet" href="https://nyanpasu64.gitlab.io/main.css">
+  <link rel="stylesheet" href="https://nyanpasu64.gitlab.io/assets/css/CrimsonProital@0400070014001700.css">
+
+  <link rel="icon" type="image/png" sizes="32x32" href="https://nyanpasu64.gitlab.io/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://nyanpasu64.gitlab.io/favicon-16x16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://nyanpasu64.gitlab.io/apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
+
+  
+    <link type="application/atom+xml" rel="alternate" href="https://nyanpasu64.gitlab.io/atom.xml" title="nyanpasu64&#x27;s blog" />
+  
+
+  
+
+  
+  
+</head>
+
+<body>
+  
+  <nav class="nav">
+    <div class="nav-container">
+      <a href="https://nyanpasu64.gitlab.io">
+        <h2 class="nav-title">nyanpasu64&#x27;s blog</h2>
+      </a>
+      <ul>
+        
+          
+            <li><a href="https://nyanpasu64.gitlab.io">Posts</a></li>
+          
+        
+      </ul>
+    </div>
+  </nav>
+  
+
+  <main>
+    
+  <div class="post">
+  	<h1 class="post-title">ExoTracker Newsletter #1</h1>
+  	<div class="post-info">
+  		<span>Written by</span> nyanpasu64<br>
+  		<span>on&nbsp;</span><time datetime="2020-08-26T01:46:00-07:00">August 26, 2020</time>
+  	</div>
+  	<div class="post-line"></div>
+  	<p>I just finished implementing timeline entry editing. Since I have school coming up, I decided to release a demo of its current state. Since my summary was getting a bit too long to post in Discord, I decided to write a blog post / newsletter.</p>
+<h2 id="demo-download">Demo download</h2>
+<p>Windows 64-bit: <a href="https://ci.appveyor.com/api/buildjobs/3e0uv6sxov74g50d/artifacts/exotracker-v1.0.60-dev.7z">https://ci.appveyor.com/api/buildjobs/3e0uv6sxov74g50d/artifacts/exotracker-v1.0.60-dev.7z</a></p>
+<p>Source: <a href="https://gitlab.com/nyanpasu64/exotracker-cpp/-/tree/timeline-editor">https://gitlab.com/nyanpasu64/exotracker-cpp/-/tree/timeline-editor</a> (currently commit d5386ea0). It only compiles in recent GCC and Clang (only tested Clang 10), due to using statement expressions.</p>
+<h2 id="demo-notes">Demo notes</h2>
+<ul>
+<li><strong>Press Space to enable note entry, and Enter to play.</strong> Unfortunately, note preview is not supported yet.</li>
+<li>ExoTracker uses a FamiTracker-style piano layout.</li>
+<li>Only Famicom/NES APU1 is supported. Some demo songs have dual APU1 which can be used for composing.</li>
+<li>Notes, instruments, and volumes are supported. Effects are not.</li>
+<li>Try passing in names of sample documents as command-line arguments. Listed in order from most to least useful:
+<ul>
+<li>Partial songs: <code>dream-fragments</code>, <code>world-revolution</code> (default song)</li>
+<li><code>empty</code> (add your own notes)</li>
+<li><code>audio-test</code> (dual APU1) (sounds bad, but useful for finding audio stuttering)</li>
+<li><code>block-test</code> (dual APU1) (rendering test for block system, no notes or events)</li>
+<li><code>render-test</code> (sounds bad, negative octave text is too wide for the screen)</li>
+</ul>
+</li>
+<li>Some sample documents have short and/or looped blocks (the gray rectangles to the left of each channel), which are not possible in most other trackers (I don't know if LSDj and C64 trackers support this). But right now, users can only create full-grid blocks, and cannot delete blocks.
+<ul>
+<li>The block system is powerful, but unfortunately not editable through the UI yet, so you can't try it out to see useful it is.</li>
+<li>Pattern reuse is not implemented.</li>
+</ul>
+</li>
+<li>All edits are undoable. Some but not all timeline edits save cursor position.</li>
+<li>There are buttons for reordering timeline entries. They're supposed to have icons instead of text, but icons are only available on my machine.</li>
+<li>The actual timeline widget (list of rows) is unfinished and will be replaced with a custom-drawn widget.</li>
+<li>The audio code will lock up if you decrease the timeline row length until a block has a negative length 😉</li>
+</ul>
+<h2 id="timeline-system-overview">Timeline system overview</h2>
+<p><strong>tl;dr skip forward to &quot;Demo feedback&quot; if you want to just play with the program instead of reading documentation.</strong></p>
+<p>The frame/order editor is replaced with a timeline editor, and its functionality is changed significantly.</p>
+<p>The pattern grid structure from existing trackers is carried over (under the name of timeline rows and grid cells). Each timeline row has its own length which can vary between rows (like OpenMPT, unlike FamiTracker). Each timeline row holds one timeline cell (or grid cell) per channel. However, unlike patterns, timeline cells do not contain events directly, but through several layers of indirection.</p>
+<p>A timeline cell can hold zero or more blocks, which carry a start and end time (in integer beats) and a pattern. These blocks have nonzero length, do not overlap in time, occur in increasing time order, and lie between 0 and the timeline cell's length (the last block's end time can take on a special value corresponding to &quot;end of cell&quot;)[1].</p>
+<p>Each block contains a single pattern, consisting of a list of events and an optional loop duration (in integer beats). The pattern starts playing when absolute time reaches the block's start time, and stops playing when absolute time reaches the block's end time. If the loop duration is set, whenever relative time (within the pattern) reaches the loop duration, playback jumps back to the pattern's begin. A block can cut off a pattern's events early when time reaches the block's end time (either the pattern's initial play or during a loop). However a block cannot start playback partway into a pattern (no plans to add support yet).</p>
+<p>Eventually, patterns can be reused in multiple blocks at different times (and possibly different channels).</p>
+<p>[1] I'm not sure what to do if a user shrinks a timeline row, which causes an numeric-end block to end past the cell, or an &quot;end of cell&quot; block to have a size ≤ 0, etc.</p>
+<h3 id="motivation">Motivation</h3>
+<p>The timeline system is intended to allow treating the program like FamiStudio or a tracker, with timestamps encoded relative to current pattern/frame begin, and reuse at pattern-level granularity. If you try to enter a note/volume/effect in a region without a block in place, a block is automatically created in the current channel, filling all empty space available (up to an entire grid cell) (not implemented yet).</p>
+<p>It is also intended to have a similar degree of flexibility as a DAW like Reaper (fine-grained block splitting and looping). The tradeoff is that because global timestamps are relative to grid cell begin, blocks are not allowed to cross grid cell boundaries (otherwise it would be painful to convert between block/pattern-relative and global timestamps).</p>
+<h2 id="unresolved-questions">Unresolved questions</h2>
+<ul>
+<li>Are the gray block rectangles (to the left of each channel) ugly? I'm planning to use those to allow dragging patterns around, resizing them, and distinguishing reused patterns through color.</li>
+<li>Should I rename the timeline to something else?
+<ul>
+<li>Sequence?</li>
+<li>Order? (I feel it's bad because &quot;order&quot; implies every entry is merely the ID of a single pattern, but in reality is a container for 0 or more loopable patterns.)</li>
+<li>OpenMPT has an &quot;order list&quot; widget to edit a &quot;sequence&quot; of patterns; it uses two names for similar concepts.</li>
+</ul>
+</li>
+<li>What should I call a row/unit in the timeline editor? It's treated as a coarse unit of time and a container for blocks/patterns, but is not a pattern.
+<ul>
+<li>Grid row? Timeline/sequence row? (I keep confusing &quot;timeline row&quot; with &quot;pattern row&quot;. &quot;Grid&quot; is concise, but I don't know if it's an unintuitive name.)</li>
+<li>Segment?</li>
+<li>(Timeline/sequence) entry?</li>
+<li>Cell? (currently used for &quot;one row, one channel&quot;)</li>
+</ul>
+</li>
+<li>How should I improve my current behavior when adding and deleting timeline entries?
+<ul>
+<li>Should adding a new timeline entry move the cursor to the new entry's row 0? Should undoing move the cursor to the same spot, move it to the old location, or leave the cursor in place?</li>
+<li>Should deleting an timeline entry move the cursor to the former entry's row 0? Should undoing move the cursor to the same spot, move it to the old location, or leave the cursor in place?</li>
+<li>Eventually I'll add the ability to right-click and add/delete timeline entries other than the one the cursor is in. Should the cursor move to the right-clicked entry, and stay there after undoing?</li>
+</ul>
+</li>
+<li>Once the timeline widget is implemented, what should it show?
+<ul>
+<li>Titles for each sequence entry?</li>
+<li>&quot;Pattern overview&quot; with coarse-grained visualizations of blocks (gray for unique blocks, colored for shared)? Should shared patterns have numbers? Names? Should all patterns have numbers (an idea I'm not a fan of)?</li>
+<li>Draw both (and somehow try to find enough room for both)?</li>
+<li>0CC has bookmarks and highlights, but doesn't show all names.</li>
+</ul>
+</li>
+</ul>
+<h2 id="feedback">Feedback</h2>
+<p>If you find any crash bugs, let me know. (Some tricky-to-get-right areas were deleting the last row in the timeline, or deleting a long row and the cursor moves into the next, shorter, row.)</p>
+<p>If you have any UI or behavior suggestions, tell me too. (I personally think I got the code reasonably watertight, but the UI behavior is a toss-up and I have no clue how people will react.)</p>
+<p>You can report issues at <a href="https://gitlab.com/nyanpasu64/exotracker-cpp/-/issues">https://gitlab.com/nyanpasu64/exotracker-cpp/-/issues</a>.</p>
+
+  </div>
+
+	
+
+  <div class="pagination">
+  	<a href="https://nyanpasu64.gitlab.io/blog/exotracker-issues-abandoning-the-grid/" class="left arrow">&#8592; Newer</a>
+		<a href="#" class="top">Top</a>
+		<a href="https://nyanpasu64.gitlab.io/blog/describing-convolution-using-item-based-indexing-and-inclusive-ranges/" class="right arrow">Older &#8594;</a>
+  </div>
+
+  </main>
+
+  
+  <footer>
+    <span>Adventures in programming, DSP, and chiptune.<br>Made with <a href="https://www.getzola.org">Zola</a> using the
+      <a href="https://github.com/aaranxu/tale-zola">Tale-Zola</a> theme
+      (<a href="https://github.com/nyanpasu64/tale-zola">modified</a>).
+    </span>
+  </footer>
+  
+</body>
+</html>
