@@ -3,7 +3,8 @@ description: 'Build and deploy a Zola site to GitHub Pages'
 author: 'Shaleen Jain'
 runs:
   using: 'docker'
-  image: 'Dockerfile'
+  image: 'alpine:latest'
+  entrypoint: '.github/actions/zola-deploy-action/install.sh'
 branding:
-  icon: 'zap'  
+  icon: 'zap'
   color: 'green'
