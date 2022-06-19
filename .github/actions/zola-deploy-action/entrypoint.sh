@@ -2,6 +2,10 @@
 set -e
 set -o pipefail
 
+wget -q -O - \
+"https://github.com/getzola/zola/releases/download/v0.15.3/zola-v0.15.3-x86_64-unknown-linux-gnu.tar.gz" \
+| tar xzf - -C /usr/local/bin
+
 # For backwards compatibility
 if [[ -n "$TOKEN" ]]; then
     GITHUB_TOKEN=$TOKEN
