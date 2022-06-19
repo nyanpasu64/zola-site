@@ -57,6 +57,8 @@ fi
 main() {
     echo "Starting deploy..."
 
+    ldd /usr/local/bin/zola
+
     version=$(zola --version)
     remote_repo="https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@${GITHUB_HOSTNAME}/${TARGET_REPOSITORY}.git"
     remote_branch=$PAGES_BRANCH
